@@ -15,7 +15,7 @@ if __name__ == "__main__":
     if not token: raise RuntimeError("请设置GM_TOKEN环境变量")
     run(strategy_id=user_environment("GM_BACKTEST_STRATEGY_ID", "08196542-1ba7-11f1-8c86-107c6107318f"),
         filename="main.py", mode=MODE_BACKTEST, token=token,
-        backtest_start_time=user_environment("GM_BACKTEST_START", "2022-01-01 09:00:00"),
+        backtest_start_time=user_environment("GM_BACKTEST_START", "2025-01-01 09:00:00"),
         backtest_end_time=user_environment("GM_BACKTEST_END", "2025-12-31 15:00:00"),
         backtest_adjust=ADJUST_PREV, backtest_initial_cash=float(user_environment("GM_BACKTEST_CASH", "1000000")),
         backtest_commission_ratio=0.0003, backtest_slippage_ratio=0.001)

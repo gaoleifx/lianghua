@@ -9,30 +9,12 @@ _configs = {}
 
 
 def strategy_profile():
-    profile = os.environ.get("GOLDMINER_STRATEGY_PROFILE", "conservative").strip().lower()
-    if profile not in ("conservative", "aggressive"):
-        raise ValueError("GOLDMINER_STRATEGY_PROFILE must be conservative or aggressive")
-    return profile
+    """Return the only supported strategy profile.
 
-
-def _deep_update(base, override):
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_update(base[key], value)
-        else:
-            base[key] = deepcopy(value)
-    return base
-
-
-def apply_profile(raw, profile=None):
-    profile = profile or strategy_profile()
-    cfg = deepcopy(raw)
-    profiles = cfg.pop("profiles", {})
-    if profile not in profiles:
-        raise ValueError("missing strategy profile: %s" % profile)
-    _deep_update(cfg, profiles[profile])
-    cfg["profile"] = profile
-    return cfg
+    The profile label remains in runtime state filenames so existing conservative
+    state can be reused safely, but profile switching is intentionally removed.
+    """
+    return "conservative"
 
 
 def validate_config(cfg):
@@ -102,13 +84,14 @@ def validate_config(cfg):
 
 def load_config(path=None):
     global _configs
-    profile = strategy_profile()
-    cache_key = (os.path.abspath(path or CONFIG_PATH), profile)
+    cache_key = os.path.abspath(path or CONFIG_PATH)
     if path is None and cache_key in _configs:
         return _configs[cache_key]
     with open(path or CONFIG_PATH, "r", encoding="utf-8") as handle:
         raw = json.load(handle)
-    cfg = validate_config(apply_profile(raw, profile))
+    cfg = deepcopy(raw)
+    cfg["profile"] = strategy_profile()
+    cfg = validate_config(cfg)
     if path is None:
         _configs[cache_key] = cfg
     return cfg
