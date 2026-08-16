@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional
@@ -102,24 +103,44 @@ class LocalDatabase:
         if not codes:
             return pd.DataFrame()
         marks = ",".join("?" for _ in codes)
-        with self._connect(self.stocks_path) as con:
+        with closing(self._connect(self.stocks_path)) as con:
             return pd.read_sql_query(
                 "SELECT code,name,sector,market,last_update FROM stocks WHERE code IN (%s)" % marks,
                 con, params=codes,
             )
 
     def bars(self, codes: Iterable[str], as_of: str, count=130) -> pd.DataFrame:
-        codes = list(dict.fromkeys(to_code(c) for c in codes))
-        if not codes:
+        requested = list(dict.fromkeys(str(c) for c in codes))
+        if not requested:
             return pd.DataFrame()
-        marks = ",".join("?" for _ in codes)
-        query = """SELECT code,date,open,close,high,low,volume FROM (
-          SELECT code,date,open,close,high,low,volume,
-                 ROW_NUMBER() OVER(PARTITION BY code ORDER BY date DESC) AS rn
-          FROM history WHERE code IN (%s) AND date<?
-        ) WHERE rn<=? ORDER BY code,date""" % marks
-        with self._connect(self.stocks_path) as con:
-            return pd.read_sql_query(query, con, params=codes + [as_of, count])
+        benchmark_symbols = set([self.config["universe"]["index_symbol"]] +
+                                self.config["universe"].get("fallback_index_symbols", []))
+        index_symbols = [symbol for symbol in requested if symbol in benchmark_symbols]
+        stock_codes = list(dict.fromkeys(to_code(symbol) for symbol in requested
+                                         if symbol not in benchmark_symbols))
+        frames = []
+        with closing(self._connect(self.stocks_path)) as con:
+            if stock_codes:
+                marks = ",".join("?" for _ in stock_codes)
+                query = """SELECT code,date,open,close,high,low,volume FROM (
+                  SELECT code,date,open,close,high,low,volume,
+                         ROW_NUMBER() OVER(PARTITION BY code ORDER BY date DESC) AS rn
+                  FROM history WHERE code IN (%s) AND date<?
+                ) WHERE rn<=? ORDER BY code,date""" % marks
+                frames.append(pd.read_sql_query(query, con, params=stock_codes + [as_of, count]))
+            if index_symbols:
+                exists = con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_history'").fetchone()
+                if exists:
+                    marks = ",".join("?" for _ in index_symbols)
+                    query = """SELECT symbol AS code,date,open,close,high,low,volume FROM (
+                      SELECT symbol,date,open,close,high,low,volume,
+                             ROW_NUMBER() OVER(PARTITION BY symbol ORDER BY date DESC) AS rn
+                      FROM index_history WHERE symbol IN (%s) AND date<?
+                    ) WHERE rn<=? ORDER BY code,date""" % marks
+                    frames.append(pd.read_sql_query(query, con, params=index_symbols + [as_of, count]))
+        usable = [frame for frame in frames if not frame.empty]
+        return pd.concat(usable, ignore_index=True) if usable else pd.DataFrame()
 
     def financials(self, codes: Iterable[str], as_of: str) -> pd.DataFrame:
         codes = list(dict.fromkeys(to_code(c) for c in codes))
@@ -134,7 +155,7 @@ class LocalDatabase:
                  ROW_NUMBER() OVER(PARTITION BY code ORDER BY report_date DESC, id DESC) AS rn
           FROM financial WHERE code IN (%s) AND report_date<=?
         ) WHERE rn=1""" % marks
-        with self._connect(self.financial_path) as con:
+        with closing(self._connect(self.financial_path)) as con:
             return pd.read_sql_query(query, con, params=codes + [cutoff])
 
 

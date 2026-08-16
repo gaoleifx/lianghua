@@ -1,5 +1,5 @@
 {
-  "version": "v6.4",
+  "version": "v6.5-datafix",
   "data": {
     "root_env": "GOLDMINER_DATA_ROOT",
     "default_root": "D:\\股票数据库",
@@ -68,7 +68,7 @@
   },
   "deployment": {
     "live_new_entries_enabled": false,
-    "validation_status": "v6.4_passed_2025_gate_and_continuous_backtest_pending_simulation_20260815"
+    "validation_status": "data_integrity_fixed_pending_full_revalidation_20260816"
   },
   "risk": {
     "permanent_capital_lock": true,
