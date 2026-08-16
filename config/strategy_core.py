@@ -201,6 +201,47 @@ def calculate_market_breadth(bars: pd.DataFrame) -> Dict[str, float]:
     return {"total": total, "bullish": bullish, "ratio": bullish / total if total else 0.0}
 
 
+def trend_leader_signal(frame: pd.DataFrame, entry_price=0.0, config=None) -> Dict[str, object]:
+    """严格使用传入历史切片识别连板/强趋势与量价派发，不访问未来数据。"""
+    cfg = (config or {}).get("trend_leader", config or {})
+    if frame is None or len(frame) < 21:
+        return {"leader": False, "trend_intact": False, "distribution": False,
+                "limit_up_streak": 0, "recent_limit_ups": 0}
+    ordered = frame.sort_values("date")
+    closes = ordered["close"].astype(float)
+    highs = ordered["high"].astype(float) if "high" in ordered else closes
+    volumes = ordered["volume"].astype(float)
+    returns = closes.pct_change().fillna(0.0)
+    threshold = float(cfg.get("limit_up_return", 0.095))
+    limit_flags = ((returns >= threshold) &
+                   (closes >= highs * float(cfg.get("sealed_close_high_ratio", 0.995))))
+    streak = 0
+    for value in reversed(limit_flags.tail(10).tolist()):
+        if not value:
+            break
+        streak += 1
+    window = int(cfg.get("recent_limit_window", 5))
+    recent_limits = int(limit_flags.tail(window).sum())
+    ma10, ma20 = float(closes.tail(10).mean()), float(closes.tail(20).mean())
+    current = float(closes.iloc[-1])
+    gain = current / float(entry_price) - 1 if entry_price and entry_price > 0 else 0.0
+    volume_ratio = float(volumes.tail(3).mean() / max(volumes.tail(20).mean(), 1.0))
+    weighted_pressure = float((returns.tail(3) * volumes.tail(3)).sum() /
+                              max(volumes.tail(3).sum(), 1.0))
+    distribution = bool(current < ma10 and
+                        (weighted_pressure <= float(cfg.get("distribution_pressure", -0.02)) or
+                         (float(returns.iloc[-1]) <= float(cfg.get("distribution_day_return", -0.03)) and
+                          volume_ratio >= float(cfg.get("distribution_volume_ratio", 1.30)))))
+    leader = bool(streak >= int(cfg.get("minimum_limit_up_streak", 2)) or
+                  (recent_limits >= int(cfg.get("minimum_recent_limit_ups", 2)) and
+                   gain >= float(cfg.get("minimum_leader_profit", 0.12))))
+    trend_intact = bool(current >= ma10 and ma10 >= ma20 * float(cfg.get("ma10_vs_ma20_floor", 0.98)))
+    return {"leader": leader, "trend_intact": trend_intact, "distribution": distribution,
+            "limit_up_streak": streak, "recent_limit_ups": recent_limits,
+            "volume_ratio": volume_ratio, "weighted_pressure": weighted_pressure,
+            "ma10": ma10, "ma20": ma20, "gain": gain}
+
+
 def market_target_exposure(breadth_ratio: float, config=None) -> float:
     """Return the configured gross exposure for the observed market breadth."""
     cfg = config or load_config()
@@ -224,7 +265,8 @@ class FactorEngine:
         self.config = config or load_config()
 
     def build_raw(self, universe: UniverseSnapshot, bars: pd.DataFrame, financials: pd.DataFrame,
-                  master: pd.DataFrame, benchmark_bars: pd.DataFrame = None) -> pd.DataFrame:
+                  master: pd.DataFrame, benchmark_bars: pd.DataFrame = None,
+                  market_breadth: float = None) -> pd.DataFrame:
         """Build price/volume factors plus an optional validated point-in-time GM snapshot."""
         meta = master.set_index("code") if not master.empty else pd.DataFrame()
         required_financial = {"symbol", "pub_date", "roe_weight_avg", "inc_oper_yoy",
@@ -254,6 +296,20 @@ class FactorEngine:
             highs, lows = frame["high"].astype(float), frame["low"].astype(float)
             volumes = frame["volume"].astype(float)
             returns = closes.pct_change().dropna()
+            leader_cfg = self.config.get("trend_leader", {})
+            limit_threshold = float(leader_cfg.get("limit_up_return", 0.095))
+            limit_up_flags = ((returns >= limit_threshold) &
+                              (closes >= highs * float(leader_cfg.get("sealed_close_high_ratio", 0.995))))
+            recent_limit_ups = int(limit_up_flags.tail(int(
+                leader_cfg.get("recent_limit_window", 5))).sum())
+            failed_limit_flags = ((highs / closes.shift(1) - 1 >= limit_threshold) &
+                                  (returns < limit_threshold))
+            recent_failed_limits = int(failed_limit_flags.tail(int(
+                leader_cfg.get("recent_limit_window", 5))).sum())
+            recent_positions = np.flatnonzero(limit_up_flags.tail(int(
+                leader_cfg.get("recent_limit_window", 5))).to_numpy())
+            limit_up_span = (int(recent_positions[-1] - recent_positions[0] + 1)
+                             if len(recent_positions) >= 2 else 99)
             turnover = float((closes * volumes).tail(self.config["universe"]["liquidity_lookback"]).mean())
             if turnover < self.config["universe"]["minimum_average_turnover"]:
                 universe.excluded[symbol] = "illiquid"
@@ -278,10 +334,11 @@ class FactorEngine:
             if return_60 < self.config["factors"].get("minimum_60d_return", -1):
                 universe.excluded[symbol] = "weak_60d_momentum"
                 continue
-            if return_5 > self.config["factors"].get("maximum_5d_return", math.inf):
+            if (return_5 > self.config["factors"].get("maximum_5d_return", math.inf) and
+                    recent_limit_ups < 2):
                 universe.excluded[symbol] = "short_term_overheated"
                 continue
-            if return_20 > self.config["factors"]["overheat_20d_return"]:
+            if return_20 > self.config["factors"]["overheat_20d_return"] and recent_limit_ups < 2:
                 universe.excluded[symbol] = "overheated"
                 continue
             if self.config["factors"].get("require_bullish_ma_alignment", False) and not (
@@ -347,6 +404,9 @@ class FactorEngine:
                 "distance_60_high": distance_60_high, "breakout_20": breakout_20,
                 "trend_efficiency": float(efficiency), "downside_volatility": downside_vol,
                 "worst_day": worst_day, "atr_ratio": float(atr_pct),
+                "recent_limit_ups": recent_limit_ups,
+                "recent_failed_limits": recent_failed_limits,
+                "limit_up_span": limit_up_span,
                 "turnover": turnover, "amount_stability": float(amount_stability),
                 "volatility": volatility, "atr": atr, "last_close": float(closes.iloc[-1]),
                 "theme_match": 1.0 if theme_match else 0.0,
@@ -363,6 +423,20 @@ class FactorEngine:
         raw["industry_return_60"] = raw.groupby("industry")["return_60"].transform("median")
         raw["industry_excess_market_20"] = raw["industry_return_20"] - market_20
         raw["industry_excess_market_60"] = raw["industry_return_60"] - market_60
+        raw["market_trend_positive"] = bool(market_20 > 0 and market_60 > 0)
+        leader_cfg = self.config.get("trend_leader", {})
+        breadth_ok = (market_breadth is not None and
+                      float(market_breadth) >= float(
+                          leader_cfg.get("minimum_market_breadth_for_candidate", 0.35)))
+        raw["potential_leader_qualified"] = (
+            (raw["recent_limit_ups"] >= int(leader_cfg.get("minimum_recent_limit_ups", 2))) &
+            (raw["recent_failed_limits"] <= int(leader_cfg.get("maximum_recent_failed_limits", 0))) &
+            (raw["limit_up_span"] <= int(leader_cfg.get("maximum_limit_up_span", 3))) &
+            (raw["trend_efficiency"] >= float(leader_cfg.get("minimum_candidate_efficiency", 0.65))) &
+            (raw["distance_60_high"] >= -float(leader_cfg.get("maximum_candidate_high_distance", 0.03))) &
+            (raw["return_5"] >= float(leader_cfg.get("minimum_candidate_5d_return", 0.18))) &
+            (raw["return_5"] <= float(leader_cfg.get("maximum_candidate_5d_return", 0.35))) &
+            raw["market_trend_positive"] & breadth_ok)
         raw["excess_market_20"] = raw["return_20"] - market_20
         raw["excess_market_60"] = raw["return_60"] - market_60
         raw["relative_strength_20"] = 0.5 * raw["excess_market_20"] + 0.5 * (
@@ -425,6 +499,16 @@ class FactorEngine:
             composites.append(np.nan if coverage < self.config["factors"]["minimum_coverage"] else
                               sum(weights[f] * v for f, v in available) / coverage)
         scored["composite"] = composites
+        bonus_per_board = float(self.config.get("trend_leader", {}).get("selection_bonus_per_limit_up", 0.0))
+        max_bonus = float(self.config.get("trend_leader", {}).get("maximum_selection_bonus", 0.0))
+        if bonus_per_board > 0 and "recent_limit_ups" in scored:
+            qualified = scored.get("potential_leader_qualified", False)
+            board_bonus = (scored["recent_limit_ups"].clip(lower=0) * bonus_per_board).clip(upper=max_bonus)
+            board_bonus = board_bonus.where(qualified, 0.0)
+            scored["composite"] = scored["composite"] + board_bonus
+            false_leader = (scored["recent_limit_ups"] >= 2) & ~qualified
+            scored.loc[false_leader, "composite"] -= float(
+                self.config.get("trend_leader", {}).get("unqualified_spike_penalty", 0.50))
         scored = scored.dropna(subset=["composite"]).sort_values("composite", ascending=False)
         scored["percentile"] = scored["composite"].rank(ascending=False, pct=True)
         result = []
@@ -453,6 +537,10 @@ class FactorEngine:
                     "return_5": float(row.get("return_5", np.nan)),
                     "return_20": float(row.get("return_20", np.nan)),
                     "return_60": float(row.get("return_60", np.nan)),
+                    "recent_limit_ups": int(row.get("recent_limit_ups", 0)),
+                    "recent_failed_limits": int(row.get("recent_failed_limits", 0)),
+                    "limit_up_span": int(row.get("limit_up_span", 99)),
+                    "potential_leader_qualified": bool(row.get("potential_leader_qualified", False)),
                     "quality_growth": (None if pd.isna(row.get("quality_growth"))
                                        else float(row.get("quality_growth"))),
                 }))

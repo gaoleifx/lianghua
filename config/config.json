@@ -1,5 +1,5 @@
 {
-  "version": "v6.6-candidate-return-first-bold",
+  "version": "v6.8-candidate-quality-leader-breadth-confirmed-2026",
   "data": {
     "root_env": "GOLDMINER_DATA_ROOT",
     "default_root": "D:\\股票数据库",
@@ -37,13 +37,35 @@
     "confirmation_factors": ["near_high", "efficiency"],
     "minimum_potential_confirmations": 0,
     "require_relative_strength_for_entry": false,
-    "require_benchmark_bullish_for_new_entries": false
-    ,"minimum_market_breadth": 0.20,
+    "require_benchmark_bullish_for_new_entries": true
+    ,"minimum_market_breadth": 0.30,
     "financial_factor_enabled": false,
     "minimum_financial_coverage": 0.60
     ,"rank_gentle_momentum": false,
     "theme_score_bonus": 0.0,
     "theme_keywords": []
+  },
+  "trend_leader": {
+    "limit_up_return": 0.095,
+    "sealed_close_high_ratio": 0.995,
+    "recent_limit_window": 5,
+    "minimum_limit_up_streak": 2,
+    "minimum_recent_limit_ups": 2,
+    "minimum_leader_profit": 0.12,
+    "minimum_candidate_efficiency": 0.65,
+    "maximum_candidate_high_distance": 0.015,
+    "maximum_recent_failed_limits": 0,
+    "maximum_limit_up_span": 3,
+    "minimum_candidate_5d_return": 0.18,
+    "maximum_candidate_5d_return": 0.35,
+    "minimum_market_breadth_for_candidate": 0.35,
+    "selection_bonus_per_limit_up": 0.25,
+    "maximum_selection_bonus": 0.60,
+    "unqualified_spike_penalty": 0.00,
+    "distribution_pressure": -0.02,
+    "distribution_day_return": -0.03,
+    "distribution_volume_ratio": 1.30,
+    "ma10_vs_ma20_floor": 0.98
   },
   "portfolio": {
     "minimum_stocks": 2,

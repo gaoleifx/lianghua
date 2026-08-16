@@ -16,8 +16,9 @@ from strategy_core import (FactorEngine, LocalDatabase, PortfolioBuilder, RiskEn
                            StateStore, TradeIntent, UniverseSnapshot, protected_limit_price,
                            evaluate_tradability, position_available, position_cost,
                            can_increase_existing_position, positive_pyramid_target,
-                           calculate_market_breadth, market_target_exposure,
+                           calculate_market_breadth, market_target_exposure, trend_leader_signal,
                            round_lot, to_code, to_gm_symbol)
+from market_intelligence import live_main_fund_signal
 
 try:
     from gm.api import *
@@ -31,6 +32,18 @@ FACTORS = FactorEngine(CONFIG)
 PORTFOLIO = PortfolioBuilder(CONFIG)
 RISK = RiskEngine(CONFIG)
 _FINANCIAL_CACHE = {}
+_TREND_SIGNAL_CACHE = {}
+
+
+def _cached_trend_signal(symbol, as_of, entry_price):
+    key = (symbol, str(as_of), round(float(entry_price or 0), 4))
+    if key not in _TREND_SIGNAL_CACHE:
+        history_frame = DB.bars([symbol], str(as_of), 40)
+        _TREND_SIGNAL_CACHE[key] = trend_leader_signal(history_frame, entry_price, CONFIG)
+        if len(_TREND_SIGNAL_CACHE) > 1000:
+            for old_key in list(_TREND_SIGNAL_CACHE)[:-500]:
+                _TREND_SIGNAL_CACHE.pop(old_key, None)
+    return _TREND_SIGNAL_CACHE[key]
 
 
 def _state_filename(role, profile, suffix=""):
@@ -383,7 +396,8 @@ def rebalance(context):
         _log("rebalance_aborted", reason="financial_coverage_insufficient",
              coverage=financial_coverage,
              minimum=CONFIG["factors"].get("minimum_financial_coverage")); return
-    raw_factors = FACTORS.build_raw(snapshot, bars, financials, master, benchmark_bars)
+    raw_factors = FACTORS.build_raw(snapshot, bars, financials, master, benchmark_bars,
+                                    market_breadth=breadth["ratio"])
     rows = FACTORS.score(raw_factors)
     _log("factor_snapshot", as_of=as_of, signal_cutoff="strictly_before_rebalance_date",
          benchmark_source=benchmark_source,
@@ -438,6 +452,16 @@ def rebalance(context):
         if symbol not in target_map and held < CONFIG["portfolio"]["minimum_holding_days"]:
             continue
         if symbol not in target_map:
+            history_frame = bars[bars["code"].astype(str).map(to_code) == to_code(symbol)]
+            leader = trend_leader_signal(history_frame, position_cost(pos), CONFIG)
+            if leader["leader"]:
+                state["leader_mode"] = True
+                state["leader_detected_date"] = as_of
+            if (state.get("leader_mode") and leader["trend_intact"] and
+                    not leader["distribution"] and not state.get("main_fund_withdrawal", False)):
+                _log("leader_exit_suppressed", symbol=symbol, attempted_reason="rank_exit",
+                     leader_signal=leader, fund_signal=state.get("main_fund_signal"))
+                continue
             last = float(pos.get("price") or pos.get("last_price") or position_cost(pos))
             exits.append((symbol, last))
     prices = {item.symbol: float(latest.loc[to_code(item.symbol), "close"]) for item in targets}
@@ -651,8 +675,31 @@ def on_bar(context, bars):
         held = int(state.get("holding_days", 0))
         if position_available(pos) <= 0:
             _log("risk_exit_deferred", symbol=symbol, reason="t_plus_one_no_available"); continue
+        leader = _cached_trend_signal(symbol, today, position_cost(pos))
+        if leader["leader"]:
+            state["leader_mode"] = True
+            state["leader_detected_date"] = today
+        if (context.strategy_role == "live" and state.get("leader_mode") and
+                getattr(context, "now", datetime.now()).strftime("%H:%M:%S") >= "14:30:00"):
+            fund_signal = live_main_fund_signal(symbol, getattr(context, "now", datetime.now()))
+            state["main_fund_signal"] = fund_signal
+            state["main_fund_withdrawal"] = bool(fund_signal.get("available") and
+                                                   fund_signal.get("withdrawal"))
+            _log("leader_fund_monitor", symbol=symbol, signal=fund_signal)
         reason = RISK.exit_reason(position_cost(pos), current, state["peak"],
                                   float(state.get("atr", 0)), held)
+        if reason == "trailing_profit" and state.get("leader_mode"):
+            withdrawal = bool(state.get("main_fund_withdrawal", False))
+            if leader["trend_intact"] and not leader["distribution"] and not withdrawal:
+                _log("leader_exit_suppressed", symbol=symbol, attempted_reason=reason,
+                     leader_signal=leader, fund_signal=state.get("main_fund_signal"))
+                reason = None
+            elif withdrawal:
+                reason = "leader_main_fund_exit"
+            elif leader["distribution"]:
+                reason = "leader_distribution_exit"
+            else:
+                reason = "leader_trend_break_exit"
         if reason:
             _submit_target(context, symbol, 0, reason, current)
     context.strategy_state.save()
