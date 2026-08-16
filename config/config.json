@@ -1,5 +1,5 @@
 {
-  "version": "v6.3",
+  "version": "v6.4",
   "data": {
     "root_env": "GOLDMINER_DATA_ROOT",
     "default_root": "D:\\股票数据库",
@@ -61,14 +61,14 @@
     "minimum_holding_days": 5,
     "maximum_holding_days": 20,
     "enforce_maximum_holding_days": false,
-    "minimum_rebalance_interval_days": 10,
+    "minimum_rebalance_interval_days": 12,
     "exit_cooldown_days": 5,
     "rebalance_time": "10:00:00",
     "rebalance_retry_times": ["10:30:00", "11:25:00", "13:30:00", "14:30:00"]
   },
   "deployment": {
     "live_new_entries_enabled": false,
-    "validation_status": "passed_2025_gate_and_continuous_backtest_pending_simulation_20260815"
+    "validation_status": "v6.4_passed_2025_gate_and_continuous_backtest_pending_simulation_20260815"
   },
   "risk": {
     "permanent_capital_lock": true,
