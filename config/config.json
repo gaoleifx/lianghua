@@ -38,7 +38,7 @@
     "minimum_potential_confirmations": 0,
     "require_relative_strength_for_entry": false,
     "require_benchmark_bullish_for_new_entries": true
-    ,"minimum_market_breadth": 0.30,
+    ,"minimum_market_breadth": 0.25,
     "financial_factor_enabled": false,
     "minimum_financial_coverage": 0.60
     ,"rank_gentle_momentum": false,

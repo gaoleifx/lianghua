@@ -70,7 +70,7 @@ class StrategyCoreTests(unittest.TestCase):
         self.assertEqual(conservative["profile"], "conservative")
         self.assertFalse(conservative["portfolio"]["enforce_maximum_holding_days"])
         self.assertFalse(conservative["execution"]["positive_pyramid"]["enabled"])
-        self.assertEqual(conservative["factors"]["minimum_market_breadth"], 0.30)
+        self.assertEqual(conservative["factors"]["minimum_market_breadth"], 0.25)
         self.assertTrue(conservative["portfolio"]["dynamic_exposure_enabled"])
         self.assertEqual(_state_filename("live", "conservative"), "live_conservative.json")
         self.assertEqual(_state_filename("backtest", "conservative", "run:01"),
@@ -425,4 +425,3 @@ class StrategyCoreTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
-
