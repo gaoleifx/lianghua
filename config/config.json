@@ -17,7 +17,7 @@
     "liquidity_lookback": 20
   },
   "factors": {
-    "weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.30, "volume_confirmation": 0.00, "trend_efficiency": 0.30, "downside_risk": 0.40, "liquidity": 0.00, "quality_growth": 0.00},
+    "weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.25, "volume_confirmation": 0.00, "trend_efficiency": 0.30, "downside_risk": 0.45, "liquidity": 0.00, "quality_growth": 0.00},
     "winsorize_quantile": 0.05,
     "minimum_coverage": 0.55,
     "entry_percentile": 0.15,
