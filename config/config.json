@@ -85,15 +85,15 @@
     "enforce_maximum_holding_days": false,
     "minimum_rebalance_interval_days": 7,
     "exit_cooldown_days": 3,
-    "rebalance_time": "10:00:00",
-    "rebalance_retry_times": ["10:30:00", "11:25:00", "13:30:00", "14:30:00"]
+    "rebalance_time": "09:25:00",
+    "rebalance_retry_times": ["09:45:00", "10:00:00", "10:15:00", "10:30:00", "10:45:00", "11:00:00", "11:15:00", "11:30:00", "11:45:00", "12:00:00", "12:15:00", "12:30:00", "12:45:00", "13:00:00", "13:15:00", "13:30:00", "13:45:00", "14:00:00", "14:15:00", "14:30:00", "14:45:00"]
   },
   "deployment": {
-    "live_new_entries_enabled": false,
-    "validation_status": "bold_candidate_backtested_2023_2026_pending_simulation_20260816"
+    "live_new_entries_enabled": true,
+    "validation_status": "live_enabled_20260824_account_asset_based"
   },
   "risk": {
-    "permanent_capital_lock": true,
+    "permanent_capital_lock": false,
     "hard_stop_loss": 0.10,
     "atr_stop_multiple": 3.0,
     "trailing_activation": 0.12,
@@ -102,10 +102,10 @@
     "market_ma_days": 60,
     "market_reduce_below_ma": 0.95,
     "market_stop_below_ma": 0.88,
-    "portfolio_drawdown_reduce": 0.10,
-    "portfolio_drawdown_force_exit": 0.15,
-    "portfolio_drawdown_stop": 0.18,
-    "all_time_peak_drawdown_lock": 0.15,
+    "portfolio_drawdown_reduce": 0.06,
+    "portfolio_drawdown_force_exit": 0.08,
+    "portfolio_drawdown_stop": 0.10,
+    "all_time_peak_drawdown_lock": 0.10,
     "risk_recovery_cooldown_days": 10,
     "risk_recovery_above_ma": 1.00,
     "risk_recovery_degraded_cooldown_days": 20,

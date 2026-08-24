@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 from gm.api import (ADJUST_NONE, history_n, set_token, stk_get_index_constituents,
@@ -73,10 +73,26 @@ def sync_industries(items):
     logging.info("行业同步完成: %d", len(frame))
 
 
-def sync_history(items, progress):
+def expected_history_date(now=None):
+    now = now or datetime.now()
+    day = now.date()
+    if now.time().hour < 15 or (now.time().hour == 15 and now.time().minute < 45):
+        day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day.isoformat()
+
+
+def sync_history(items, progress, target_date=None):
+    target_date = target_date or expected_history_date()
     done = set(progress.get("completed_history", [])); success = fail = 0
     for index, symbol in enumerate(items, 1):
-        if symbol in done: continue
+        code = symbol.split(".")[-1]
+        if symbol in done:
+            with sqlite3.connect(STOCKS_DB) as con:
+                local_latest = con.execute("SELECT MAX(date) FROM history WHERE code=?", (code,)).fetchone()[0]
+            if local_latest and local_latest >= target_date:
+                continue
         try:
             frame = history_n(symbol=symbol, frequency="1d", count=180,
                               fields="symbol,eob,open,close,high,low,volume",
@@ -87,17 +103,21 @@ def sync_history(items, progress):
                     records.append((symbol.split(".")[-1], pd.Timestamp(row.eob).strftime("%Y-%m-%d"),
                                     float(row.open), float(row.close), float(row.high), float(row.low), int(row.volume)))
             if records:
+                latest_record_date = max(r[1] for r in records)
                 with sqlite3.connect(STOCKS_DB) as con:
                     con.executemany("INSERT OR IGNORE INTO history(code,date,open,close,high,low,volume) VALUES(?,?,?,?,?,?,?)", records)
                     con.execute("UPDATE stocks SET price=?,last_update=? WHERE code=?",
                                 (records[-1][3], datetime.now().isoformat(timespec="seconds"), records[-1][0]))
                     con.commit()
-                success += 1
+                if latest_record_date >= target_date:
+                    success += 1
+                    done.add(symbol)
+                else:
+                    fail += 1
+                    logging.warning("行情未更新到目标日期 %s: %s 最新=%s", target_date, symbol, latest_record_date)
             else: fail += 1
         except Exception as exc:
             fail += 1; logging.warning("行情失败 %s: %s", symbol, exc)
-        if records:
-            done.add(symbol)
         progress["run_date"] = datetime.now().strftime("%Y-%m-%d")
         progress["completed_history"] = sorted(done); progress["updated"] = datetime.now().isoformat()
         if index % 20 == 0: save_progress(progress); logging.info("行情进度 %d/%d 成功=%d 失败=%d", index, len(items), success, fail)
@@ -168,7 +188,8 @@ def audit(items):
 
 def main():
     log=setup_log(); set_token(user_environment("GM_TOKEN")); items=symbols(); progress=load_progress()
-    logging.info("自动同步启动，成分=%d",len(items)); sync_industries(items); sync_history(items,progress)
+    target_date = expected_history_date()
+    logging.info("自动同步启动，成分=%d，目标日期=%s",len(items), target_date); sync_industries(items); sync_history(items,progress,target_date)
     sync_index_history()
     result=audit(items); progress["audit"]=result; progress["status"]="complete"; save_progress(progress)
     print(json.dumps(result,ensure_ascii=False)); print("日志:",log)

@@ -75,9 +75,23 @@ def _daily_data_healthy(context):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             status = json.load(handle)
+        progress_path = os.path.join(data_root(CONFIG), "progress", "auto_sync_index800.json")
         if status.get("status") != "healthy":
+            try:
+                with open(progress_path, "r", encoding="utf-8") as progress_handle:
+                    progress = json.load(progress_handle)
+                audit = progress.get("audit", {})
+                if (progress.get("status") == "complete" and
+                        int(audit.get("history", 0)) >= 760 and
+                        int(audit.get("master", 0)) >= 760 and
+                        status.get("abnormal_index_return_rows", 0) == 0 and
+                        status.get("index_data_fresh") is not False):
+                    return True, "healthy:sync_completion_fallback:%s" % audit.get("latest")
+            except (OSError, TypeError, ValueError):
+                pass
             return False, "scheduled_update_" + str(status.get("status", "unknown"))
-        if int(status.get("latest_coverage", 0)) < 760:
+        coverage = status.get("complete_coverage", status.get("latest_coverage", 0))
+        if int(coverage) < 760:
             return False, "latest_coverage_insufficient"
         return True, "healthy:%s" % status.get("latest_trade_date")
     except (OSError, ValueError) as exc:
