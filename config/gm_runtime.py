@@ -16,7 +16,9 @@ from strategy_core import (FactorEngine, LocalDatabase, PortfolioBuilder, RiskEn
                            StateStore, TradeIntent, UniverseSnapshot, protected_limit_price,
                            evaluate_tradability, position_available, position_cost,
                            can_increase_existing_position, positive_pyramid_target,
-                           calculate_market_breadth, market_target_exposure, trend_leader_signal,
+                           calculate_market_breadth, market_target_exposure, market_entry_allowed, trend_leader_signal,
+                           market_exit_percentile,
+                           classify_market_regime,
                            round_lot, to_code, to_gm_symbol)
 from market_intelligence import live_main_fund_signal
 
@@ -75,8 +77,27 @@ def _daily_data_healthy(context):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             status = json.load(handle)
-        progress_path = os.path.join(data_root(CONFIG), "progress", "auto_sync_index800.json")
         if status.get("status") != "healthy":
+            # A completed snapshot can be one or two trading days behind the
+            # strategy clock (for example, after a delayed market-data sync).
+            # Do not block the strategy solely because the freshness wrapper
+            # is marked degraded; retain the hard coverage and data-integrity
+            # checks below. Three calendar days also covers a normal weekend.
+            latest = status.get("latest_complete_trade_date") or status.get("latest_trade_date")
+            expected = status.get("expected_trade_date") or getattr(context, "now", datetime.now()).strftime("%Y-%m-%d")
+            try:
+                lag_days = (pd.Timestamp(expected) - pd.Timestamp(latest)).days
+            except (TypeError, ValueError):
+                lag_days = 999
+            coverage = status.get("complete_coverage", status.get("latest_coverage", 0))
+            if (latest and 0 <= lag_days <= 3 and int(coverage) >= 760 and
+                    status.get("abnormal_index_return_rows", 0) == 0):
+                return True, "acceptable_staleness:%s:%dd" % (latest, lag_days)
+            # The sync worker writes its completion marker before the wrapper
+            # writes data_freshness.json.  Recover from that interrupted final
+            # write when the database audit proves that today's snapshot is
+            # complete; otherwise keep the fail-closed behavior.
+            progress_path = os.path.join(data_root(CONFIG), "progress", "auto_sync_index800.json")
             try:
                 with open(progress_path, "r", encoding="utf-8") as progress_handle:
                     progress = json.load(progress_handle)
@@ -203,6 +224,44 @@ def _universe(as_of):
 
 def initialize(context, role):
     context.strategy_role = role
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_REBALANCE_INTERVAL"):
+        CONFIG["portfolio"]["minimum_rebalance_interval_days"] = int(
+            os.environ["GOLDMINER_BACKTEST_REBALANCE_INTERVAL"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_MIN_BREADTH"):
+        CONFIG["factors"]["minimum_market_breadth"] = float(
+            os.environ["GOLDMINER_BACKTEST_MIN_BREADTH"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEAK_EXPOSURE"):
+        weak_exposure = float(os.environ["GOLDMINER_BACKTEST_WEAK_EXPOSURE"])
+        for level in CONFIG["portfolio"].get("breadth_exposure_levels", []):
+            if float(level.get("minimum_breadth", 1.0)) == 0.20:
+                level["target_exposure"] = weak_exposure
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEIGHTS"):
+        for item in os.environ["GOLDMINER_BACKTEST_WEIGHTS"].split(","):
+            name, value = item.split("=", 1)
+            if name not in CONFIG["factors"]["weights"]:
+                raise ValueError("unknown backtest factor weight: %s" % name)
+            CONFIG["factors"]["weights"][name] = float(value)
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_ENTRY_PERCENTILE"):
+        CONFIG["factors"]["entry_percentile"] = float(
+            os.environ["GOLDMINER_BACKTEST_ENTRY_PERCENTILE"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_MIN_CONFIRMATIONS"):
+        CONFIG["factors"]["minimum_potential_confirmations"] = int(
+            os.environ["GOLDMINER_BACKTEST_MIN_CONFIRMATIONS"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_REPLACEMENT_MARGIN"):
+        CONFIG["factors"]["replacement_score_margin"] = float(
+            os.environ["GOLDMINER_BACKTEST_REPLACEMENT_MARGIN"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_EXIT_PERCENTILE"):
+        CONFIG["factors"]["exit_percentile"] = float(
+            os.environ["GOLDMINER_BACKTEST_EXIT_PERCENTILE"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_TRANSITION_EARLY_WEIGHT"):
+        CONFIG["factors"]["potential_transition_early_weight"] = float(
+            os.environ["GOLDMINER_BACKTEST_TRANSITION_EARLY_WEIGHT"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_ENFORCE_MAX_HOLD"):
+        CONFIG["portfolio"]["enforce_maximum_holding_days"] = (
+            os.environ["GOLDMINER_BACKTEST_ENFORCE_MAX_HOLD"] == "1")
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEIGHT_TOLERANCE"):
+        CONFIG["execution"]["target_weight_tolerance"] = float(
+            os.environ["GOLDMINER_BACKTEST_WEIGHT_TOLERANCE"])
     context.strategy_state = _state_store(role)
     if role == "backtest":
         # 每次回测必须从干净状态开始，禁止继承其他回测区间的峰值、持仓和订单。
@@ -217,7 +276,10 @@ def initialize(context, role):
     schedule(schedule_func=weekly_rebalance_gate, date_rule="1d", time_rule=CONFIG["portfolio"]["rebalance_time"])
     # 首次调仓未完成（last_rebalance未写入）时，在当日后续时点自动重试。
     # weekly_rebalance_gate自身负责周频、风控及强制退出门控，成功后不会重复下单。
-    for time_rule in CONFIG["portfolio"].get("rebalance_retry_times", []):
+    retry_times = CONFIG["portfolio"].get("rebalance_retry_times", [])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_FAST") == "1":
+        retry_times = []
+    for time_rule in retry_times:
         schedule(schedule_func=weekly_rebalance_gate, date_rule="1d", time_rule=time_rule)
     for time_rule in ("09:35:00", "10:30:00", "11:25:00", "13:30:00", "14:30:00", "14:55:00"):
         schedule(schedule_func=daily_risk_check, date_rule="1d", time_rule=time_rule)
@@ -245,7 +307,13 @@ def weekly_rebalance_gate(context):
         _log("rebalance_aborted", reason="same_day_after_forced_exit")
         return
     # 任意交易日均可尝试；只有实际完成调仓才会写last_rebalance并消耗本周额度。
-    rebalance(context)
+    _log("rebalance_attempt", strategy_time=now.isoformat(), last_rebalance=last)
+    try:
+        rebalance(context)
+    except Exception as exc:
+        # A scheduler callback must not die silently: later retry slots should
+        # remain available, and the reason must be visible in strategy output.
+        _log("rebalance_failed", error=str(exc), strategy_time=now.isoformat())
 
 
 def _positions(account_id):
@@ -254,6 +322,8 @@ def _positions(account_id):
 
 def _account(context):
     account = context.account(account_id=context.account_id)
+    if account is None or not getattr(account, "cash", None):
+        raise RuntimeError("account_unavailable:%s" % context.account_id)
     cash = account.cash
     return account, float(cash.get("nav", cash.get("asset", 0))), float(cash.get("available", 0))
 
@@ -360,18 +430,24 @@ def rebalance(context):
     master = DB.stock_master(snapshot.symbols)
     benchmark_bars = pd.DataFrame()
     benchmark_source = None
+    benchmark_diagnostics = []
     for candidate in [CONFIG["universe"]["index_symbol"]] + CONFIG["universe"].get("fallback_index_symbols", []):
         local_benchmark = DB.bars([candidate], as_of, 130)
         last_benchmark_date = (pd.Timestamp(local_benchmark["date"].max())
                                if not local_benchmark.empty else pd.NaT)
         staleness = ((pd.Timestamp(as_of) - last_benchmark_date).days
                      if not pd.isna(last_benchmark_date) else math.inf)
+        benchmark_diagnostics.append({"symbol": candidate, "bars": len(local_benchmark),
+                                      "last_date": (None if pd.isna(last_benchmark_date)
+                                                    else str(last_benchmark_date.date())),
+                                      "staleness_days": staleness})
         if len(local_benchmark) >= 61 and staleness <= int(CONFIG["data"]["max_staleness_days"]):
             benchmark_bars = local_benchmark
             benchmark_source = candidate
             break
     if benchmark_bars.empty:
-        _log("rebalance_aborted", reason="benchmark_signal_unavailable")
+        _log("rebalance_aborted", reason="benchmark_signal_unavailable",
+             benchmark_diagnostics=benchmark_diagnostics, as_of=as_of)
         return
     benchmark_closes = benchmark_bars.sort_values("date")["close"].astype(float)
     benchmark_ma20 = float(benchmark_closes.tail(20).mean())
@@ -382,10 +458,26 @@ def rebalance(context):
     breadth = calculate_market_breadth(bars)
     minimum_breadth = float(CONFIG["factors"].get("minimum_market_breadth", 0.0))
     target_exposure = market_target_exposure(breadth["ratio"], CONFIG)
-    market_entry_ok = (not CONFIG["factors"].get("require_benchmark_bullish_for_new_entries", False) or
-                       (float(benchmark_closes.iloc[-1]) > benchmark_ma20 > benchmark_ma60 and
-                        benchmark_return20 > 0 and benchmark_ma20_slope > 0 and
-                        breadth["ratio"] >= minimum_breadth))
+    if not os.environ.get("GOLDMINER_BACKTEST_EXIT_PERCENTILE"):
+        CONFIG["factors"]["exit_percentile"] = market_exit_percentile(breadth["ratio"], CONFIG)
+    benchmark_trend_ok = (float(benchmark_closes.iloc[-1]) > benchmark_ma20 > benchmark_ma60 and
+                           benchmark_return20 > 0 and benchmark_ma20_slope > 0 and
+                           breadth["ratio"] >= minimum_breadth)
+    context.strategy_state.state["market_regime"] = classify_market_regime(
+        breadth["ratio"], benchmark_trend_ok, target_exposure, CONFIG)
+    context.strategy_state.state["market_breadth"] = float(breadth["ratio"])
+    context.strategy_state.state["benchmark_return20"] = benchmark_return20
+    context.strategy_state.state["benchmark_trend_ok"] = bool(benchmark_trend_ok)
+    # Market regime controls the amount of capital available to new positions.
+    # It is only a binary entry gate when explicitly configured, so weak-but-
+    # improving stocks can still be discovered and tested with small exposure.
+    market_entry_ok = market_entry_allowed(benchmark_closes, breadth["ratio"], CONFIG)
+    # Controlled ablation for historical comparison only.  This keeps the
+    # production default decoupled while allowing an apples-to-apples test of
+    # the former benchmark hard gate with the same runtime and costs.
+    if (context.strategy_role == "backtest" and
+            os.environ.get("GOLDMINER_FORCE_LEGACY_MARKET_GATE") == "1"):
+        market_entry_ok = benchmark_trend_ok
     positions = _positions(context.account_id)
     holding = {p["symbol"]: p for p in positions}
     if context.strategy_role == "live" and not CONFIG.get("deployment", {}).get(
@@ -394,13 +486,22 @@ def rebalance(context):
         _log("live_entry_gate", enabled=False,
              validation_status=CONFIG.get("deployment", {}).get("validation_status", "unknown"),
              existing_positions=len(holding))
-    if not market_entry_ok and not holding:
+    audit_only_gate = (context.strategy_role == "backtest" and
+                       not market_entry_ok and not holding)
+    if not market_entry_ok and not holding and not audit_only_gate:
         reason = ("live_validation_not_approved" if context.strategy_role == "live" else
-                  "benchmark_entry_trend_weak")
+                  ("market_breadth_below_entry_floor" if target_exposure <= 0 else
+                   "benchmark_entry_trend_weak"))
         _log("rebalance_aborted", reason=reason,
              benchmark_source=benchmark_source, benchmark_return20=benchmark_return20,
              benchmark_ma20_slope=benchmark_ma20_slope, market_breadth=breadth,
              minimum_market_breadth=minimum_breadth)
+        # A zero-exposure regime is an intentional terminal no-op for this
+        # rebalance date; consume the retry window instead of re-running the
+        # same expensive universe scan on every intraday retry slot.
+        if target_exposure <= 0:
+            context.strategy_state.state["last_rebalance"] = as_of
+            context.strategy_state.save()
         return
     try:
         financials, financial_coverage = _gm_financial_snapshot(snapshot.symbols, as_of)
@@ -413,11 +514,52 @@ def rebalance(context):
     raw_factors = FACTORS.build_raw(snapshot, bars, financials, master, benchmark_bars,
                                     market_breadth=breadth["ratio"])
     rows = FACTORS.score(raw_factors)
+    excluded_counts = {}
+    for reason in snapshot.excluded.values():
+        excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
+    archetypes = {"trend_start": 0, "weak_to_strong": 0}
+    if not raw_factors.empty:
+        # These are descriptive audit buckets, not additional entry gates.
+        trend_start = ((raw_factors["breakout_20"] > 0) &
+                       (raw_factors["return_5"] <= float(CONFIG["factors"].get(
+                           "maximum_5d_return", math.inf))))
+        weak_to_strong = ((raw_factors["early_strength_5d"] > 0) &
+                          (raw_factors["return_20"] <= 0))
+        archetypes = {"trend_start": int(trend_start.sum()),
+                      "weak_to_strong": int(weak_to_strong.sum())}
+    _log("candidate_selection_audit", as_of=as_of,
+         universe_symbols=len(snapshot.symbols), excluded_count=len(snapshot.excluded),
+         excluded_reasons=excluded_counts, factor_rows=len(raw_factors),
+         scored_rows=len(rows), archetypes=archetypes,
+         market_entry_ok=market_entry_ok, target_exposure=target_exposure,
+         gate_blocked=(not market_entry_ok),
+         gate_block_reason=("zero_exposure" if target_exposure <= 0 else
+                            ("benchmark_or_config_gate" if not market_entry_ok else None)))
+    if audit_only_gate:
+        # In historical replay, inspect the blocked opportunity set without
+        # allowing any order.  This makes "gate blocked" distinguishable from
+        # "not selected" and enables a future-return audit for the top scored
+        # symbols while preserving the extreme-weak production behavior.
+        _log("gate_blocked_opportunity_audit", as_of=as_of,
+             reason=("zero_exposure" if target_exposure <= 0 else
+                     "benchmark_or_config_gate"),
+             market_breadth=breadth, target_exposure=target_exposure,
+             benchmark_trend_ok=benchmark_trend_ok,
+             qualified_symbols=[row.symbol for row in rows[:30]],
+             qualified_candidate_archetypes=[{
+                 "symbol": row.symbol,
+                 "archetype": row.details.get("candidate_archetype", "general"),
+             } for row in rows[:30]],
+             archetypes=archetypes)
+        context.strategy_state.state["last_rebalance"] = as_of
+        context.strategy_state.save()
+        return
     _log("factor_snapshot", as_of=as_of, signal_cutoff="strictly_before_rebalance_date",
          benchmark_source=benchmark_source,
          financials_enabled=CONFIG["factors"].get("financial_factor_enabled", False),
          financial_source="gm_point_in_time_prime", financial_coverage=financial_coverage,
-         benchmark_entry_ok=market_entry_ok, benchmark_return20=benchmark_return20,
+         benchmark_entry_ok=market_entry_ok, benchmark_trend_ok=benchmark_trend_ok,
+         benchmark_return20=benchmark_return20,
          benchmark_ma20_slope=benchmark_ma20_slope, market_breadth=breadth,
          minimum_market_breadth=minimum_breadth,
          target_exposure=target_exposure,
@@ -425,6 +567,7 @@ def rebalance(context):
          candidates=[{
              "symbol": row.symbol, "industry": row.industry, "percentile": row.percentile,
              "composite": row.composite, "confirmations": row.confirmations,
+             "candidate_archetype": row.details.get("candidate_archetype", "general"),
              "confirmation_names": row.details.get("confirmation_names", []),
              "details": row.details, "raw": row.raw, "scores": row.scores,
          } for row in rows[:30]])
@@ -596,6 +739,28 @@ def daily_risk_check(context):
         context.strategy_state.state["risk_multiplier"] = risk_state.multiplier
         context.strategy_state.state["risk_reason"] = risk_state.reason
         context.strategy_state.state["risk_updated"] = getattr(context, "now", datetime.now()).isoformat()
+        # Persist a compact point-in-time equity curve for backtest auditability.
+        # Keep only one observation per trading date so repeated callbacks do not
+        # inflate the state file.
+        if context.strategy_role == "backtest":
+            curve = context.strategy_state.state.setdefault("equity_curve", [])
+            observation = {
+                "date": getattr(context, "now", datetime.now()).strftime("%Y-%m-%d"),
+                "asset": asset,
+                "peak_asset": peak,
+                "all_time_peak_asset": all_time_peak,
+                "risk_multiplier": risk_state.multiplier,
+                "market_regime": context.strategy_state.state.get("market_regime", "unknown"),
+                "market_breadth": context.strategy_state.state.get("market_breadth"),
+                "market_target_exposure": context.strategy_state.state.get("market_target_exposure"),
+                "positions_count": len(positions),
+                "gross_exposure": (sum(float(p.get("market_value", 0) or 0)
+                                       for p in positions) / asset if asset > 0 else 0.0),
+            }
+            if curve and curve[-1].get("date") == observation["date"]:
+                curve[-1] = observation
+            else:
+                curve.append(observation)
         if risk_state.multiplier < 1:
             base_exposure = float(context.strategy_state.state.get(
                 "market_target_exposure", 1 - CONFIG["portfolio"]["cash_reserve"]))
@@ -722,6 +887,8 @@ def on_bar(context, bars):
 def on_order_status(context, order):
     status = order.get("status")
     symbol = order.get("symbol")
+    side = order.get("side")
+    trade_day = getattr(context, "now", datetime.now()).strftime("%Y-%m-%d")
     terminal = status in (OrderStatus_Filled, OrderStatus_DoneForDay, OrderStatus_Canceled,
                           OrderStatus_Rejected, OrderStatus_Stopped, OrderStatus_Expired)
     if terminal:
@@ -733,9 +900,30 @@ def on_order_status(context, order):
                     terminal=True,
                     outcome=str(status),
                 )
-    if status == OrderStatus_Filled and order.get("side") == OrderSide_Buy:
+    if status == OrderStatus_Filled:
+        # Keep a compact execution ledger for post-trade 5/10-day and FIFO
+        # realized-PnL analysis.  It is audit-only and does not affect sizing.
+        ledger = context.strategy_state.state.setdefault("trade_ledger", [])
+        reason = None
+        for item in context.strategy_state.state.get("completed_intents", {}).values():
+            if item.get("symbol") == symbol:
+                reason = item.get("reason")
+        fill_price = float(order.get("price") or 0)
+        fill_volume = int(order.get("volume") or 0)
+        turnover = fill_price * fill_volume
+        commission = max(turnover * float(CONFIG["execution"].get("commission_rate", 0)),
+                         float(CONFIG["execution"].get("minimum_commission", 0))
+                         if turnover > 0 else 0.0)
+        stamp_tax = (turnover * float(CONFIG["execution"].get("stamp_tax_rate", 0))
+                     if side == OrderSide_Sell else 0.0)
+        slippage = turnover * float(CONFIG["execution"].get("slippage_bps", 0)) / 10000.0
+        ledger.append({"date": trade_day, "symbol": symbol, "side": str(side),
+                       "price": fill_price, "volume": fill_volume, "reason": reason,
+                       "commission_estimate": commission,
+                       "stamp_tax_estimate": stamp_tax,
+                       "slippage_estimate": slippage})
+    if status == OrderStatus_Filled and side == OrderSide_Buy:
         state = context.strategy_state.state["positions"].setdefault(symbol, {})
-        trade_day = getattr(context, "now", datetime.now()).strftime("%Y-%m-%d")
         state.setdefault("entry_date", trade_day)
         state.setdefault("holding_days", 0)
         state.setdefault("last_holding_date", trade_day)
@@ -743,7 +931,7 @@ def on_order_status(context, order):
         state.setdefault("pyramid_base_price", float(order.get("price", 0)))
         state.setdefault("atr", 0.0)
         context.strategy_state.save()
-    if status == OrderStatus_Filled and order.get("side") == OrderSide_Sell:
+    if status == OrderStatus_Filled and side == OrderSide_Sell:
         # Any sell starts a fresh risk/pyramid cycle for the remaining position. This avoids
         # carrying an obsolete peak or pyramid reference through a portfolio-level reduction.
         context.strategy_state.state.setdefault("exit_dates", {})[symbol] = getattr(

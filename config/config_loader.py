@@ -28,6 +28,13 @@ def validate_config(cfg):
     for name, value in weights.items():
         if not isinstance(value, (int, float)) or value < 0:
             raise ValueError("非法因子权重: %s" % name)
+    weak_weights = cfg["factors"].get("weak_market_weights")
+    if weak_weights is not None:
+        if set(weak_weights) != set(weights) or abs(sum(weak_weights.values()) - 1.0) > 1e-8:
+            raise ValueError("弱市因子权重必须与主权重同键且合计为1")
+        if any(not isinstance(value, (int, float)) or value < 0
+               for value in weak_weights.values()):
+            raise ValueError("非法弱市因子权重")
     p = cfg["portfolio"]
     if not 1 <= p.get("minimum_stocks", 1) <= p["max_stocks"] <= 50:
         raise ValueError("max_stocks必须在1到50之间")

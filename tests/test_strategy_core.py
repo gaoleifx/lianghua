@@ -20,6 +20,8 @@ from strategy_core import (FactorEngine, FactorRow, LocalDatabase, PortfolioBuil
                            evaluate_tradability, position_available, position_cost,
                            can_increase_existing_position, positive_pyramid_target,
                            calculate_market_breadth, market_target_exposure,
+                           market_exit_percentile,
+                           classify_market_regime,
                            trend_leader_signal,
                            protected_limit_price, round_lot)
 
@@ -32,14 +34,18 @@ class StrategyCoreTests(unittest.TestCase):
         cfg = json.loads(json.dumps(self.cfg)); cfg["factors"]["weights"]["relative_strength"] += .1
         with self.assertRaises(ValueError): validate_config(cfg)
 
-    def test_return_first_bold_defaults(self):
-        self.assertEqual(self.cfg["version"], "v6.8-candidate-quality-leader-breadth-confirmed-2026")
+    def test_latest_validated_risk_defaults(self):
+        self.assertEqual(self.cfg["version"], "v6.12-regime-weight-rebalance-2026")
         self.assertEqual(self.cfg["portfolio"]["minimum_rebalance_interval_days"], 7)
         self.assertTrue(self.cfg["portfolio"]["dynamic_exposure_enabled"])
         self.assertEqual(self.cfg["portfolio"]["max_stocks"], 3)
-        self.assertEqual(self.cfg["risk"]["all_time_peak_drawdown_lock"], 0.15)
-        self.assertFalse(self.cfg["portfolio"]["enforce_maximum_holding_days"])
-        self.assertFalse(self.cfg["deployment"]["live_new_entries_enabled"])
+        self.assertEqual(self.cfg["risk"]["portfolio_drawdown_reduce"], 0.06)
+        self.assertEqual(self.cfg["risk"]["portfolio_drawdown_force_exit"], 0.08)
+        self.assertEqual(self.cfg["risk"]["portfolio_drawdown_stop"], 0.10)
+        self.assertEqual(self.cfg["risk"]["all_time_peak_drawdown_lock"], 0.10)
+        self.assertFalse(self.cfg["risk"]["permanent_capital_lock"])
+        self.assertTrue(self.cfg["portfolio"]["enforce_maximum_holding_days"])
+        self.assertTrue(self.cfg["deployment"]["live_new_entries_enabled"])
 
     def test_index_history_is_isolated_from_same_code_stock(self):
         with tempfile.TemporaryDirectory() as root:
@@ -68,13 +74,23 @@ class StrategyCoreTests(unittest.TestCase):
     def test_conservative_profile_and_state_files(self):
         conservative = load_config()
         self.assertEqual(conservative["profile"], "conservative")
-        self.assertFalse(conservative["portfolio"]["enforce_maximum_holding_days"])
+        self.assertTrue(conservative["portfolio"]["enforce_maximum_holding_days"])
         self.assertFalse(conservative["execution"]["positive_pyramid"]["enabled"])
         self.assertEqual(conservative["factors"]["minimum_market_breadth"], 0.25)
         self.assertTrue(conservative["portfolio"]["dynamic_exposure_enabled"])
         self.assertEqual(_state_filename("live", "conservative"), "live_conservative.json")
         self.assertEqual(_state_filename("backtest", "conservative", "run:01"),
                          "backtest_conservative_run01.json")
+
+    def test_market_regime_exit_buffer(self):
+        self.assertEqual(market_exit_percentile(0.20, self.cfg), 0.35)
+        self.assertEqual(market_exit_percentile(0.50, self.cfg), 0.50)
+
+    def test_market_regime_label_matches_controller_inputs(self):
+        self.assertEqual(classify_market_regime(.10, False, 0.0, self.cfg), "extreme_weak")
+        self.assertEqual(classify_market_regime(.25, False, .70, self.cfg), "weak")
+        self.assertEqual(classify_market_regime(.40, False, .90, self.cfg), "range")
+        self.assertEqual(classify_market_regime(.50, True, 1.00, self.cfg), "strong")
 
     def test_database_has_no_future_bars_or_financials(self):
         db = LocalDatabase(config=self.cfg)
@@ -100,7 +116,9 @@ class StrategyCoreTests(unittest.TestCase):
         engine = FactorEngine(self.cfg)
         dates = pd.date_range("2025-01-01", periods=130)
         frames = []
-        for code, prices in (("600001", np.linspace(10, 15, 130)),
+        for code, prices in (("600001", np.r_[np.linspace(10, 12, 110),
+                                               np.full(15, 12.0),
+                                               np.linspace(12.0, 13.0, 5)]),
                              ("600002", np.linspace(15, 10, 130))):
             volume = np.full(130, 10000000.0)
             if code == "600001":
@@ -119,6 +137,8 @@ class StrategyCoreTests(unittest.TestCase):
         self.assertGreaterEqual(int(raw.iloc[0].confirmation_count), 1)
         self.assertIn("confirm_rs20", raw.columns)
         self.assertIn("confirm_rs60", raw.columns)
+        self.assertIn("candidate_archetype", raw.columns)
+        self.assertEqual(raw.iloc[0].candidate_archetype, "trend_start")
 
     def test_market_breadth_counts_only_confirmed_uptrends(self):
         dates = pd.date_range("2025-01-01", periods=65).astype(str)
@@ -138,7 +158,7 @@ class StrategyCoreTests(unittest.TestCase):
         cfg = json.loads(json.dumps(self.cfg))
         cfg["portfolio"]["dynamic_exposure_enabled"] = True
         self.assertEqual(market_target_exposure(.19, cfg), 0.0)
-        self.assertEqual(market_target_exposure(.20, cfg), .70)
+        self.assertEqual(market_target_exposure(.20, cfg), .60)
         self.assertEqual(market_target_exposure(.35, cfg), .90)
         self.assertEqual(market_target_exposure(.50, cfg), 1.00)
 
@@ -333,8 +353,9 @@ class StrategyCoreTests(unittest.TestCase):
         trailing_price = peak_price * (1 - trail - .01)
         self.assertEqual(risk.exit_reason(100, trailing_price, peak_price, 1, 10), "trailing_profit")
         self.assertIsNone(risk.exit_reason(100, 99, 100, 0, 2))
-        self.assertIsNone(risk.exit_reason(
-            100, 101, 102, 0, self.cfg["portfolio"]["maximum_holding_days"] + 100))
+        self.assertEqual(risk.exit_reason(
+            100, 101, 102, 0, self.cfg["portfolio"]["maximum_holding_days"] + 100),
+                         "maximum_holding_days")
         closes = [100.0] * (self.cfg["risk"]["market_ma_days"] + 1)
         force_drawdown = self.cfg["risk"]["portfolio_drawdown_force_exit"]
         state = risk.market_state(closes, 10000 * (1 - force_drawdown - .001), 10000)
@@ -348,7 +369,7 @@ class StrategyCoreTests(unittest.TestCase):
             {"activation": .20, "drawdown": .10},
         ]
         risk = RiskEngine(cfg)
-        self.assertIsNone(risk.exit_reason(100, 111, 121, 1, 30))
+        self.assertIsNone(risk.exit_reason(100, 111, 121, 1, 10))
         self.assertEqual(risk.exit_reason(100, 108, 121, 1, 30), "trailing_profit")
 
     def test_reduced_risk_recovery_requires_cooldown_and_strong_market(self):

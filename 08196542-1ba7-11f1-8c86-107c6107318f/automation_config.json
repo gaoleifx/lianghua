@@ -1,0 +1,22 @@
+{
+  "startup_time": "08:45",
+  "shutdown_time": "15:10",
+  "desktop_number": 4,
+  "terminal_exe": "C:\\Programs\\Minmetals Goldminer\\minmetals.exe",
+  "python_exe": "C:\\Users\\Gaole\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
+  "sim_working_directory": "C:\\Users\\Gaole\\.minmetals\\projects\\08196542-1ba7-11f1-8c86-107c6107318f",
+  "sim_entry": "main.py",
+  "live_working_directory": "C:\\Users\\Gaole\\.minmetals\\projects\\a9c2a169-41ee-11f1-a1ab-107c6107318f",
+  "live_entry": "main.py",
+  "terminal_ready_host": "127.0.0.1",
+  "terminal_ready_port": 7001,
+  "terminal_ready_timeout_seconds": 120,
+  "process_stop_timeout_seconds": 20,
+  "force_kill_timeout_seconds": 10,
+  "start_task_name": "\u91cf\u5316\u7b56\u7565-\u4ea4\u6613\u65e5\u542f\u52a8",
+  "stop_task_name": "\u91cf\u5316\u7b56\u7565-\u6536\u76d8\u5173\u95ed",
+  "log_directory": "logs\\automation",
+  "state_file": "logs\\automation\\runtime_state.json",
+  "calendar_file": "trading_calendar.json"
+  ,"auto_refresh_calendar": true
+}

@@ -26,6 +26,69 @@ def to_code(symbol: str) -> str:
     return str(symbol).split(".")[-1]
 
 
+def forward_performance_labels(closes: Iterable[float], benchmark_closes: Iterable[float] = None,
+                               horizons=(5, 10), stop_loss: float = 0.10) -> pd.DataFrame:
+    """Build point-in-time-safe evaluation labels for offline validation only.
+
+    Every label at index ``t`` uses prices after ``t`` and must therefore never
+    be passed into live factor construction or order decisions.
+    """
+    price = pd.Series(list(closes), dtype=float).reset_index(drop=True)
+    benchmark = (pd.Series(list(benchmark_closes), dtype=float).reset_index(drop=True)
+                 if benchmark_closes is not None else None)
+    if benchmark is not None and len(benchmark) != len(price):
+        raise ValueError("benchmark_closes must have the same length as closes")
+    result = pd.DataFrame(index=price.index)
+    for horizon in horizons:
+        h = int(horizon)
+        if h <= 0:
+            raise ValueError("horizons must be positive")
+        future_return = price.shift(-h) / price - 1.0
+        result[f"forward_return_{h}"] = future_return
+        if benchmark is not None:
+            result[f"forward_excess_{h}"] = future_return - (benchmark.shift(-h) / benchmark - 1.0)
+        drawdowns, stopped, dip_then_rise = [], [], []
+        for i, entry in enumerate(price):
+            window = price.iloc[i + 1:i + h + 1]
+            if not np.isfinite(entry) or window.empty:
+                drawdowns.append(np.nan); stopped.append(False); dip_then_rise.append(False); continue
+            path = window / entry - 1.0
+            drawdowns.append(float(path.min()))
+            stopped.append(bool(path.min() <= -abs(float(stop_loss))))
+            dip_then_rise.append(bool(path.min() < 0 and path.iloc[-1] > 0))
+        result[f"forward_max_drawdown_{h}"] = drawdowns
+        result[f"forward_hit_stop_{h}"] = stopped
+        result[f"forward_first_dip_then_rise_{h}"] = dip_then_rise
+    return result
+
+
+def summarize_backtest_events(events: Iterable[dict]) -> dict:
+    """Summarize structured strategy events for offline backtest comparison."""
+    rows = list(events)
+    risk = [x for x in rows if x.get("event") == "portfolio_risk" and np.isfinite(float(x.get("asset", np.nan)))]
+    assets = [float(x["asset"]) for x in risk]
+    initial = float(risk[0].get("initial_asset", assets[0])) if risk else 0.0
+    peak = initial
+    max_drawdown = 0.0
+    for asset in assets:
+        peak = max(peak, asset)
+        max_drawdown = max(max_drawdown, 1.0 - asset / peak if peak > 0 else 0.0)
+    submitted = [x for x in rows if x.get("event") == "order_submitted"]
+    return {
+        "initial_asset": initial,
+        "final_asset": assets[-1] if assets else 0.0,
+        "total_return": (assets[-1] / initial - 1.0) if assets and initial > 0 else 0.0,
+        "max_drawdown": max_drawdown,
+        "portfolio_risk_events": len(risk),
+        "rebalance_completed": sum(x.get("event") == "rebalance_complete" for x in rows),
+        "rebalance_aborted": sum(x.get("event") == "rebalance_aborted" for x in rows),
+        "zero_exposure_aborted": sum(x.get("reason") == "market_breadth_below_entry_floor" for x in rows),
+        "orders_submitted": len(submitted),
+        "orders_blocked": sum(x.get("event") == "order_blocked" for x in rows),
+        "risk_reduced_events": sum(x.get("reason") == "market_or_portfolio_reduce" for x in rows),
+    }
+
+
 @dataclass
 class UniverseSnapshot:
     as_of: str
@@ -257,9 +320,50 @@ def market_target_exposure(breadth_ratio: float, config=None) -> float:
     return min(1.0, max(0.0, exposure))
 
 
+def market_entry_allowed(benchmark_closes: Iterable[float], breadth_ratio: float, config=None) -> bool:
+    """Allow normal weakness to use reduced exposure; preserve opt-in hard gate."""
+    cfg = config or load_config()
+    if market_target_exposure(breadth_ratio, cfg) <= 0:
+        return False
+    closes = np.asarray(list(benchmark_closes), dtype=float)
+    if not cfg["factors"].get("require_benchmark_bullish_for_new_entries", False):
+        return True
+    if len(closes) < 61:
+        return False
+    ma20 = float(np.mean(closes[-20:]))
+    ma60 = float(np.mean(closes[-60:]))
+    ma20_series = pd.Series(closes).rolling(20).mean()
+    slope = float(ma20 / ma20_series.iloc[-6] - 1)
+    return bool(closes[-1] > ma20 > ma60 and closes[-1] / closes[-21] - 1 > 0 and slope > 0 and
+                float(breadth_ratio) >= float(cfg["factors"].get("minimum_market_breadth", 0.0)))
+
+
+def market_exit_percentile(breadth_ratio: float, config=None) -> float:
+    """Use a wider holding buffer outside weak markets and a tighter one in weak markets."""
+    cfg = config or load_config()
+    factors = cfg["factors"]
+    weak_threshold = float(factors.get("weak_market_weight_threshold", 0.35))
+    if float(breadth_ratio) < weak_threshold:
+        return float(factors.get("weak_market_exit_percentile",
+                                  factors.get("exit_percentile", 0.35)))
+    return float(factors.get("normal_market_exit_percentile",
+                             factors.get("exit_percentile", 0.35)))
+
+
+def classify_market_regime(breadth_ratio: float, benchmark_trend_ok: bool,
+                           target_exposure: float, config=None) -> str:
+    """Map the portfolio controller inputs to an auditable market regime label."""
+    cfg = config or load_config()
+    if float(target_exposure) <= 0:
+        return "extreme_weak"
+    if float(breadth_ratio) < float(cfg["factors"].get("weak_market_weight_threshold", 0.35)):
+        return "weak"
+    return "strong" if bool(benchmark_trend_ok) else "range"
+
+
 class FactorEngine:
     NAMES = ("relative_strength", "trend_acceleration", "breakout", "volume_confirmation",
-             "trend_efficiency", "downside_risk", "liquidity", "quality_growth")
+             "trend_efficiency", "downside_risk", "potential_transition", "liquidity", "quality_growth")
 
     def __init__(self, config=None):
         self.config = config or load_config()
@@ -280,6 +384,8 @@ class FactorEngine:
                              if not benchmark_bars.empty else pd.Series(dtype=float))
         benchmark_20 = (float(benchmark_closes.iloc[-1] / benchmark_closes.iloc[-21] - 1)
                         if len(benchmark_closes) >= 61 else np.nan)
+        benchmark_5 = (float(benchmark_closes.iloc[-1] / benchmark_closes.iloc[-6] - 1)
+                       if len(benchmark_closes) >= 61 else np.nan)
         benchmark_60 = (float(benchmark_closes.iloc[-1] / benchmark_closes.iloc[-61] - 1)
                         if len(benchmark_closes) >= 61 else np.nan)
         # Build the lookup once. Repeated boolean scans made every cross-section O(stocks^2)
@@ -317,28 +423,49 @@ class FactorEngine:
             return_20 = float(closes.iloc[-1] / closes.iloc[-21] - 1)
             return_60 = float(closes.iloc[-1] / closes.iloc[-61] - 1)
             return_5 = float(closes.iloc[-1] / closes.iloc[-6] - 1)
+            prior_return_5 = float(closes.iloc[-6] / closes.iloc[-11] - 1)
+            early_strength_5d = return_5 - prior_return_5
             ma20 = float(closes.tail(20).mean())
             ma60 = float(closes.tail(60).mean())
             rolling_ma20 = closes.rolling(20).mean()
             rolling_ma60 = closes.rolling(60).mean()
             ma20_slope_5d = float(ma20 / rolling_ma20.iloc[-6] - 1)
             ma60_slope_5d = float(ma60 / rolling_ma60.iloc[-6] - 1)
+            # A controlled weak-to-strong path keeps improving laggards in the
+            # scoring matrix instead of discarding them before transition
+            # factors can be evaluated.  The path remains bounded by short-term
+            # overheat, slope, volatility and drawdown limits below.
+            transition_relative_improvement = (
+                (return_5 - benchmark_5) - (return_20 - benchmark_20) / 4.0
+                if np.isfinite(benchmark_5) and np.isfinite(benchmark_20)
+                else early_strength_5d)
+            transition_candidate = (
+                self.config["factors"].get("potential_transition_relaxed_enabled", False) and
+                early_strength_5d > 0 and transition_relative_improvement > 0 and
+                return_5 <= self.config["factors"].get("maximum_5d_return", math.inf) and
+                ma20_slope_5d > self.config["factors"].get("relaxed_minimum_ma20_slope_5d", -0.04) and
+                return_20 >= self.config["factors"].get("relaxed_minimum_20d_return", -0.08) and
+                return_60 >= self.config["factors"].get("relaxed_minimum_60d_return", -0.15))
             volatility = float(returns.tail(20).std(ddof=0) * math.sqrt(252))
             prev = closes.shift(1)
             tr = pd.concat([(highs-lows), (highs-prev).abs(), (lows-prev).abs()], axis=1).max(axis=1)
             atr = float(tr.tail(14).mean())
             atr_pct = _safe_div(atr, float(closes.iloc[-1]))
             if return_20 < self.config["factors"].get("minimum_20d_return", -1):
-                universe.excluded[symbol] = "negative_momentum"
-                continue
+                if not transition_candidate:
+                    universe.excluded[symbol] = "negative_momentum"
+                    continue
             if return_60 < self.config["factors"].get("minimum_60d_return", -1):
-                universe.excluded[symbol] = "weak_60d_momentum"
-                continue
-            if (return_5 > self.config["factors"].get("maximum_5d_return", math.inf) and
-                    recent_limit_ups < 2):
+                if not transition_candidate:
+                    universe.excluded[symbol] = "weak_60d_momentum"
+                    continue
+            # Recent limit-ups are descriptive evidence, not permission to chase
+            # an already extended move.  The entry model targets the next leg,
+            # so hard overheat caps apply to leaders as well.
+            if return_5 > self.config["factors"].get("maximum_5d_return", math.inf):
                 universe.excluded[symbol] = "short_term_overheated"
                 continue
-            if return_20 > self.config["factors"]["overheat_20d_return"] and recent_limit_ups < 2:
+            if return_20 > self.config["factors"]["overheat_20d_return"]:
                 universe.excluded[symbol] = "overheated"
                 continue
             if self.config["factors"].get("require_bullish_ma_alignment", False) and not (
@@ -399,6 +526,7 @@ class FactorEngine:
             candidates.append({
                 "symbol": symbol, "industry": industry,
                 "return_5": return_5, "return_20": return_20, "return_60": return_60,
+                "prior_return_5": prior_return_5, "early_strength_5d": early_strength_5d,
                 "ma20_slope_5d": ma20_slope_5d, "ma60_slope_5d": ma60_slope_5d,
                 "volume_ratio": float(volume_ratio), "up_down_volume_ratio": float(up_down_volume),
                 "distance_60_high": distance_60_high, "breakout_20": breakout_20,
@@ -415,6 +543,11 @@ class FactorEngine:
         raw = pd.DataFrame(candidates)
         if raw.empty:
             return raw
+        # Keep the regime available to the scorer.  The market state changes the
+        # risk budget and factor mix; it must not silently become a binary entry
+        # veto for ordinary weak markets.
+        raw["market_breadth"] = (float(market_breadth)
+                                  if market_breadth is not None else np.nan)
         # In production the benchmark is mandatory; unit-level callers may use the point-in-time
         # universe median as a deterministic fallback.
         market_20 = benchmark_20 if np.isfinite(benchmark_20) else float(raw["return_20"].median())
@@ -439,6 +572,10 @@ class FactorEngine:
             raw["market_trend_positive"] & breadth_ok)
         raw["excess_market_20"] = raw["return_20"] - market_20
         raw["excess_market_60"] = raw["return_60"] - market_60
+        raw["excess_market_5"] = (raw["return_5"] - benchmark_5
+                                   if np.isfinite(benchmark_5) else np.nan)
+        raw["recent_relative_improvement"] = (raw["excess_market_5"] -
+                                               raw["excess_market_20"] / 4.0)
         raw["relative_strength_20"] = 0.5 * raw["excess_market_20"] + 0.5 * (
             raw["return_20"] - raw["industry_return_20"])
         raw["relative_strength_60"] = 0.5 * raw["excess_market_60"] + 0.5 * (
@@ -452,6 +589,13 @@ class FactorEngine:
         raw["relative_strength"] = 0.45 * raw["relative_strength_20"] + 0.55 * raw["relative_strength_60"]
         raw["trend_acceleration"] = (0.60 * (raw["return_20"] - raw["return_60"] / 3.0) +
                                      0.25 * raw["ma20_slope_5d"] + 0.15 * raw["ma60_slope_5d"])
+        # Reward an early relative-strength transition, but keep it small so a
+        # single strong week cannot turn the model into a momentum chaser.
+        early_weight = float(self.config["factors"].get(
+            "potential_transition_early_weight", 0.55))
+        early_weight = min(1.0, max(0.0, early_weight))
+        raw["potential_transition"] = (early_weight * raw["early_strength_5d"] +
+                                        (1.0 - early_weight) * raw["recent_relative_improvement"])
         raw["breakout"] = (-raw["distance_60_high"].abs() +
                            0.5 * raw["breakout_20"].clip(-0.05, 0.03))
         raw["volume_confirmation"] = (0.60 * np.log(raw["volume_ratio"].clip(0.2, 3.0)) +
@@ -473,6 +617,18 @@ class FactorEngine:
         if unknown:
             raise ValueError("unknown confirmation factors: %s" % ",".join(unknown))
         raw["confirmation_count"] = raw[confirm_cols].sum(axis=1).astype(int)
+        # Keep the two forward-looking candidate archetypes visible per row.
+        # They are descriptive labels only; scoring and entry eligibility still
+        # use the configured factors and gates below.
+        trend_start = ((raw["breakout_20"] > 0) &
+                       (raw["return_5"] <= float(self.config["factors"].get(
+                           "maximum_5d_return", math.inf))))
+        weak_to_strong = ((raw["early_strength_5d"] > 0) &
+                          (raw["return_20"] <= 0))
+        raw["candidate_archetype"] = np.select(
+            [trend_start & weak_to_strong, trend_start, weak_to_strong],
+            ["trend_start+weak_to_strong", "trend_start", "weak_to_strong"],
+            default="general")
         return raw
 
     def score(self, raw: pd.DataFrame) -> List[FactorRow]:
@@ -492,6 +648,17 @@ class FactorEngine:
             fallback = _winsorized_z(scored[factor], q)
             scored[factor + "_score"] = scored[factor + "_score"].fillna(fallback)
         weights = self.config["factors"]["weights"]
+        weak_cfg = self.config["factors"].get("weak_market_weights", {})
+        weak_threshold = float(self.config["factors"].get(
+            "weak_market_weight_threshold", 0.35))
+        breadth = (pd.to_numeric(scored["market_breadth"], errors="coerce")
+                   if "market_breadth" in scored else
+                   pd.Series(np.nan, index=scored.index))
+        if weak_cfg and breadth.notna().any() and float(breadth.median()) < weak_threshold:
+            # In weak markets prefer downside control and a measured approach to
+            # resistance; momentum/volume factors are deliberately not allowed
+            # to dominate after their recent cross-sectional deterioration.
+            weights = weak_cfg
         composites = []
         for _, row in scored.iterrows():
             available = [(f, row[f + "_score"]) for f in self.NAMES if pd.notna(row[f + "_score"])]
@@ -524,6 +691,7 @@ class FactorEngine:
                 float(row.composite), float(row.percentile), float(row.volatility), float(row.atr),
                 confirmations, {
                     "confirmation_names": confirm_names,
+                    "candidate_archetype": str(row.get("candidate_archetype", "general")),
                     "relative_strength_20": float(row.get("relative_strength_20", np.nan)),
                     "relative_strength_60": float(row.get("relative_strength_60", np.nan)),
                     "distance_60_high": float(row.get("distance_60_high", np.nan)),

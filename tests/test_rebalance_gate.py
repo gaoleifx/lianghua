@@ -28,10 +28,10 @@ class RebalanceGateTests(unittest.TestCase):
         self.assertTrue(gm_runtime._daily_data_healthy(context)[0])
 
     def test_retry_schedule_is_configured(self):
-        self.assertEqual(
-            gm_runtime.CONFIG["portfolio"]["rebalance_retry_times"],
-            ["10:30:00", "11:25:00", "13:30:00", "14:30:00"],
-        )
+        retry_times = gm_runtime.CONFIG["portfolio"]["rebalance_retry_times"]
+        self.assertEqual(len(retry_times), 21)
+        self.assertEqual(retry_times[0], "09:45:00")
+        self.assertEqual(retry_times[-1], "14:45:00")
 
     def test_same_day_retry_runs_after_failed_attempt(self):
         context=DummyContext(datetime(2026,8,12,10,30),None)
@@ -80,4 +80,3 @@ class RebalanceGateTests(unittest.TestCase):
 
 
 if __name__=="__main__":unittest.main()
-

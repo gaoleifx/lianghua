@@ -1,5 +1,5 @@
 {
-  "version": "v6.8-candidate-quality-leader-breadth-confirmed-2026",
+  "version": "v6.12-regime-weight-rebalance-2026",
   "data": {
     "root_env": "GOLDMINER_DATA_ROOT",
     "default_root": "D:\\股票数据库",
@@ -17,16 +17,23 @@
     "liquidity_lookback": 20
   },
   "factors": {
-    "weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.25, "volume_confirmation": 0.00, "trend_efficiency": 0.30, "downside_risk": 0.45, "liquidity": 0.00, "quality_growth": 0.00},
+    "weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.30, "volume_confirmation": 0.00, "trend_efficiency": 0.30, "downside_risk": 0.40, "potential_transition": 0.00, "liquidity": 0.00, "quality_growth": 0.00},
     "winsorize_quantile": 0.05,
     "minimum_coverage": 0.55,
     "entry_percentile": 0.15,
     "minimum_entry_rank_count": 2,
     "exit_percentile": 0.35,
+    "weak_market_exit_percentile": 0.35,
+    "normal_market_exit_percentile": 0.50,
     "replacement_score_margin": 0.10,
     "overheat_20d_return": 0.35,
     "minimum_20d_return": -0.03,
     "minimum_60d_return": -0.05,
+    "potential_transition_relaxed_enabled": false,
+    "potential_transition_early_weight": 0.55,
+    "relaxed_minimum_20d_return": -0.08,
+    "relaxed_minimum_60d_return": -0.15,
+    "relaxed_minimum_ma20_slope_5d": -0.04,
     "maximum_5d_return": 0.18,
     "require_bullish_ma_alignment": false,
     "minimum_trend": 0.00,
@@ -37,7 +44,9 @@
     "confirmation_factors": ["near_high", "efficiency"],
     "minimum_potential_confirmations": 0,
     "require_relative_strength_for_entry": false,
-    "require_benchmark_bullish_for_new_entries": true
+    "require_benchmark_bullish_for_new_entries": false,
+    "weak_market_weight_threshold": 0.35,
+    "weak_market_weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.35, "volume_confirmation": 0.00, "trend_efficiency": 0.10, "downside_risk": 0.45, "potential_transition": 0.10, "liquidity": 0.00, "quality_growth": 0.00}
     ,"minimum_market_breadth": 0.25,
     "financial_factor_enabled": false,
     "minimum_financial_coverage": 0.60
@@ -59,7 +68,7 @@
     "minimum_candidate_5d_return": 0.18,
     "maximum_candidate_5d_return": 0.35,
     "minimum_market_breadth_for_candidate": 0.35,
-    "selection_bonus_per_limit_up": 0.25,
+    "selection_bonus_per_limit_up": 0.0,
     "maximum_selection_bonus": 0.60,
     "unqualified_spike_penalty": 0.00,
     "distribution_pressure": -0.02,
@@ -75,14 +84,14 @@
     "cash_reserve": 0.10,
     "dynamic_exposure_enabled": true,
     "breadth_exposure_levels": [
-      {"minimum_breadth": 0.20, "target_exposure": 0.70},
+      {"minimum_breadth": 0.20, "target_exposure": 0.60},
       {"minimum_breadth": 0.35, "target_exposure": 0.90},
       {"minimum_breadth": 0.50, "target_exposure": 1.00}
     ],
     "max_industry_weight": 0.50,
     "minimum_holding_days": 3,
     "maximum_holding_days": 20,
-    "enforce_maximum_holding_days": false,
+    "enforce_maximum_holding_days": true,
     "minimum_rebalance_interval_days": 7,
     "exit_cooldown_days": 3,
     "rebalance_time": "09:25:00",
@@ -90,7 +99,7 @@
   },
   "deployment": {
     "live_new_entries_enabled": true,
-    "validation_status": "live_enabled_20260824_account_asset_based"
+    "validation_status": "manual_live_authorization_20260829"
   },
   "risk": {
     "permanent_capital_lock": false,
@@ -119,7 +128,7 @@
     "minimum_commission": 5,
     "existing_position_add_min_profit": 0.005,
     "positive_pyramid": {"enabled": false, "initial_weight": 0.35, "levels": []},
-    "target_weight_tolerance": 0.01,
+    "target_weight_tolerance": 0.03,
     "order_timeout_seconds": 60,
     "lot_size": 100
   },

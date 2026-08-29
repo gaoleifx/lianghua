@@ -13,7 +13,8 @@ def init(context):
     context.account_id = user_environment("GOLDMINER_SIM_ACCOUNT")
     if not context.account_id:
         raise RuntimeError("请设置GOLDMINER_SIM_ACCOUNT模拟账户")
-    initialize(context, "live")
+    # 模拟盘必须使用独立的 simulation 状态，不能污染实盘 live_conservative.json。
+    initialize(context, "simulation")
 
 
 if __name__ == "__main__":
