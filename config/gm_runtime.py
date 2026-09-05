@@ -18,7 +18,7 @@ from strategy_core import (FactorEngine, LocalDatabase, PortfolioBuilder, RiskEn
                            can_increase_existing_position, positive_pyramid_target,
                            calculate_market_breadth, market_target_exposure, market_entry_allowed, trend_leader_signal,
                            market_exit_percentile,
-                           classify_market_regime,
+                           classify_market_regime, update_weak_trial_observation_pool,
                            round_lot, to_code, to_gm_symbol)
 from market_intelligence import live_main_fund_signal
 
@@ -230,6 +230,9 @@ def initialize(context, role):
     if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_MIN_BREADTH"):
         CONFIG["factors"]["minimum_market_breadth"] = float(
             os.environ["GOLDMINER_BACKTEST_MIN_BREADTH"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_MAX_STALENESS_DAYS"):
+        CONFIG["data"]["max_staleness_days"] = int(
+            os.environ["GOLDMINER_BACKTEST_MAX_STALENESS_DAYS"])
     if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEAK_EXPOSURE"):
         weak_exposure = float(os.environ["GOLDMINER_BACKTEST_WEAK_EXPOSURE"])
         for level in CONFIG["portfolio"].get("breadth_exposure_levels", []):
@@ -262,6 +265,18 @@ def initialize(context, role):
     if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEIGHT_TOLERANCE"):
         CONFIG["execution"]["target_weight_tolerance"] = float(
             os.environ["GOLDMINER_BACKTEST_WEIGHT_TOLERANCE"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEAK_TRIAL"):
+        CONFIG["factors"]["weak_market_trial_enabled"] = (
+            os.environ["GOLDMINER_BACKTEST_WEAK_TRIAL"] == "1")
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_WEAK_RECOVERY"):
+        CONFIG["factors"]["weak_market_recovery_enabled"] = (
+            os.environ["GOLDMINER_BACKTEST_WEAK_RECOVERY"] == "1")
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_TRIAL_MIN_BREADTH"):
+        CONFIG["factors"]["weak_market_trial_min_breadth"] = float(
+            os.environ["GOLDMINER_BACKTEST_TRIAL_MIN_BREADTH"])
+    if role == "backtest" and os.environ.get("GOLDMINER_BACKTEST_RECOVERY_EXPOSURE"):
+        CONFIG["factors"]["weak_market_recovery_exposure"] = float(
+            os.environ["GOLDMINER_BACKTEST_RECOVERY_EXPOSURE"])
     context.strategy_state = _state_store(role)
     if role == "backtest":
         # 每次回测必须从干净状态开始，禁止继承其他回测区间的峰值、持仓和订单。
@@ -463,6 +478,8 @@ def rebalance(context):
     benchmark_trend_ok = (float(benchmark_closes.iloc[-1]) > benchmark_ma20 > benchmark_ma60 and
                            benchmark_return20 > 0 and benchmark_ma20_slope > 0 and
                            breadth["ratio"] >= minimum_breadth)
+    previous_breadth = context.strategy_state.state.get("market_breadth")
+    previous_regime = context.strategy_state.state.get("market_regime")
     context.strategy_state.state["market_regime"] = classify_market_regime(
         breadth["ratio"], benchmark_trend_ok, target_exposure, CONFIG)
     context.strategy_state.state["market_breadth"] = float(breadth["ratio"])
@@ -535,6 +552,75 @@ def rebalance(context):
          gate_blocked=(not market_entry_ok),
          gate_block_reason=("zero_exposure" if target_exposure <= 0 else
                             ("benchmark_or_config_gate" if not market_entry_ok else None)))
+    weak_market_trial = False
+    trial_recovery = (previous_breadth is not None and
+                      breadth["ratio"] - float(previous_breadth) >= float(
+                          CONFIG["factors"].get("weak_market_trial_min_breadth_recovery", 0.03)) and
+                      benchmark_return20 >= float(CONFIG["factors"].get(
+                          "weak_market_trial_min_benchmark_return20", -0.08)) and
+                      benchmark_ma20_slope >= float(CONFIG["factors"].get(
+                          "weak_market_trial_min_ma20_slope", -0.005)))
+    trial_cfg = CONFIG["factors"]
+    recovery_phase = False
+    if (not holding and previous_regime == "extreme_weak" and
+            breadth["ratio"] >= float(trial_cfg.get(
+                "weak_market_trial_min_breadth", 0.15)) and
+            breadth["ratio"] < float(trial_cfg.get(
+                "weak_market_weight_threshold", 0.35)) and
+            trial_cfg.get("weak_market_recovery_enabled", False)):
+        recovery_candidates = [row for row in rows
+                               if row.percentile <= 0.10 and row.confirmations >= 2
+                               and row.details.get("entry_relative_strength_ok", False)
+                               and row.details.get("entry_industry_strength_ok", False)
+                               and row.details.get("return_5", math.inf) <= 0.12
+                               and row.details.get("candidate_archetype", "general") in
+                               ("trend_start", "weak_to_strong", "trend_start+weak_to_strong")]
+        if recovery_candidates:
+            recovery_phase = True
+            weak_market_trial = True
+            rows = recovery_candidates
+            target_exposure = float(trial_cfg.get("weak_market_recovery_exposure", 0.20))
+            target_count = int(trial_cfg.get("weak_market_recovery_max_stocks", 1))
+            market_entry_ok = True
+            audit_only_gate = False
+            _log("weak_market_recovery_entry", as_of=as_of,
+                 target_exposure=target_exposure,
+                 qualified_symbols=[row.symbol for row in recovery_candidates[:target_count]],
+                 candidate_count=len(recovery_candidates))
+    base_trial_candidates = [row for row in rows
+                            if row.percentile <= float(trial_cfg.get(
+                                "weak_market_trial_max_percentile", 0.05))
+                            and row.confirmations >= int(trial_cfg.get(
+                                "weak_market_trial_min_confirmations", 2))
+                            and (not trial_cfg.get("weak_market_trial_require_entry_strength", True) or
+                                 (row.details.get("entry_relative_strength_ok", False) and
+                                  row.details.get("entry_industry_strength_ok", False)))
+                            and row.details.get("return_5", math.inf) <= float(trial_cfg.get(
+                                "weak_market_trial_max_return5", 0.12))
+                            and row.details.get("candidate_archetype", "general") in
+                            ("trend_start", "weak_to_strong", "trend_start+weak_to_strong")]
+    observation_pool = update_weak_trial_observation_pool(
+        context.strategy_state.state.get("weak_trial_observation_pool",
+                                          context.strategy_state.state.get(
+                                              "weak_trial_pending_symbols", [])),
+        [], as_of,
+        max_size=int(trial_cfg.get("weak_market_trial_observation_pool_size", 5)),
+        max_age_days=int(trial_cfg.get("weak_market_trial_observation_days", 15)))
+    pending_symbols = set(observation_pool)
+    trial_candidates = [row for row in base_trial_candidates if row.symbol in pending_symbols]
+    if (audit_only_gate and not holding and trial_recovery and
+            CONFIG["factors"].get("weak_market_trial_enabled", False)):
+        if trial_candidates:
+            weak_market_trial = True
+            market_entry_ok = True
+            target_exposure = float(trial_cfg.get("weak_market_trial_exposure", 0.10))
+            rows = trial_candidates
+            audit_only_gate = False
+            _log("weak_market_trial_authorized", as_of=as_of,
+                 target_exposure=target_exposure,
+                 qualified_symbols=[row.symbol for row in trial_candidates[:int(
+                     trial_cfg.get("weak_market_trial_max_stocks", 1))]],
+                 candidate_count=len(trial_candidates))
     if audit_only_gate:
         # In historical replay, inspect the blocked opportunity set without
         # allowing any order.  This makes "gate blocked" distinguishable from
@@ -551,6 +637,14 @@ def rebalance(context):
                  "archetype": row.details.get("candidate_archetype", "general"),
              } for row in rows[:30]],
              archetypes=archetypes)
+        observation_pool = update_weak_trial_observation_pool(
+            observation_pool,
+            [row.symbol for row in base_trial_candidates], as_of,
+            max_size=int(trial_cfg.get("weak_market_trial_observation_pool_size", 5)),
+            max_age_days=int(trial_cfg.get("weak_market_trial_observation_days", 15)))
+        context.strategy_state.state["weak_trial_observation_pool"] = observation_pool
+        # Keep the old field for state readers written before the migration.
+        context.strategy_state.state["weak_trial_pending_symbols"] = list(observation_pool)
         context.strategy_state.state["last_rebalance"] = as_of
         context.strategy_state.save()
         return
@@ -576,7 +670,7 @@ def rebalance(context):
     if cooldown_days:
         rows = [row for row in rows if row.symbol not in exit_dates or
                 (pd.Timestamp(as_of) - pd.Timestamp(exit_dates[row.symbol])).days > cooldown_days]
-    if len(rows) < CONFIG["portfolio"]["max_stocks"]:
+    if len(rows) < CONFIG["portfolio"]["max_stocks"] and not weak_market_trial:
         _log("rebalance_aborted", reason="factor_coverage", available=len(rows)); return
     risk_multiplier = float(context.strategy_state.state.get("risk_multiplier", 1.0))
     if risk_multiplier <= 0:
@@ -585,21 +679,32 @@ def rebalance(context):
     latest = bars.sort_values("date").groupby("code").tail(1).set_index("code")
     all_prices = {row.symbol: float(latest.loc[to_code(row.symbol), "close"]) for row in rows if to_code(row.symbol) in latest.index}
     _, nav, _ = _account(context)
-    if market_entry_ok:
+    if weak_market_trial:
+        target_count = int(CONFIG["factors"].get("weak_market_trial_max_stocks", 1))
+    elif market_entry_ok:
         target_count = PORTFOLIO.affordable_count(
             rows, all_prices, nav, target_exposure, holding.keys(), market_entry_ok)
         if target_count < CONFIG["portfolio"]["minimum_stocks"]:
             _log("rebalance_aborted", reason="minimum_portfolio_unaffordable", nav=nav); return
     else:
         target_count = max(CONFIG["portfolio"]["minimum_stocks"], len(holding))
-    if nav <= CONFIG["portfolio"].get("small_account_threshold", 0):
+    if nav <= CONFIG["portfolio"].get("small_account_threshold", 0) and not weak_market_trial:
         targets = PORTFOLIO.build_affordable_small(
             rows, all_prices, nav, risk_multiplier, holding.keys(), market_entry_ok,
             target_exposure)
+    elif weak_market_trial:
+        # A trial is deliberately a single, capped probe even for small
+        # accounts; do not let the affordability fallback expand it into a
+        # normal multi-stock portfolio.
+        targets = PORTFOLIO.build(
+            rows, holding.keys(), risk_multiplier, target_count=target_count,
+            allow_new_positions=market_entry_ok, target_exposure=target_exposure,
+            weak_market_trial=True)
     else:
         targets = PORTFOLIO.build(rows, holding.keys(), risk_multiplier,
                                   target_count=target_count, allow_new_positions=market_entry_ok,
-                                  target_exposure=target_exposure)
+                                  target_exposure=target_exposure,
+                                  weak_market_trial=weak_market_trial)
     target_map = {x.symbol: x.weight for x in targets}
     # 只有到达最短持有期或跌出退出缓冲区才因排名卖出；风控卖出由盘中路径负责。
     exits = []

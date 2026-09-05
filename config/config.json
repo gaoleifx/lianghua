@@ -46,6 +46,22 @@
     "require_relative_strength_for_entry": false,
     "require_benchmark_bullish_for_new_entries": false,
     "weak_market_weight_threshold": 0.35,
+    "weak_market_trial_enabled": true,
+    "weak_market_trial_exposure": 0.10,
+    "weak_market_trial_max_stocks": 1,
+    "weak_market_trial_max_percentile": 0.10,
+    "weak_market_trial_min_confirmations": 2,
+    "weak_market_trial_min_breadth_recovery": 0.03,
+    "weak_market_trial_min_benchmark_return20": -0.08,
+    "weak_market_trial_min_ma20_slope": -0.005,
+    "weak_market_trial_max_return5": 0.12,
+    "weak_market_trial_require_entry_strength": true,
+    "weak_market_trial_observation_days": 15,
+    "weak_market_trial_observation_pool_size": 5,
+    "weak_market_recovery_enabled": true,
+    "weak_market_recovery_exposure": 0.20,
+    "weak_market_recovery_max_stocks": 1,
+    "weak_market_trial_min_breadth": 0.15,
     "weak_market_weights": {"relative_strength": 0.00, "trend_acceleration": 0.00, "breakout": 0.35, "volume_confirmation": 0.00, "trend_efficiency": 0.10, "downside_risk": 0.45, "potential_transition": 0.10, "liquidity": 0.00, "quality_growth": 0.00}
     ,"minimum_market_breadth": 0.25,
     "financial_factor_enabled": false,
@@ -99,7 +115,7 @@
   },
   "deployment": {
     "live_new_entries_enabled": true,
-    "validation_status": "manual_live_authorization_20260829"
+    "validation_status": "manual_live_authorization_20260903"
   },
   "risk": {
     "permanent_capital_lock": false,

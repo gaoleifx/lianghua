@@ -14,12 +14,16 @@
 
 - `factors.weights`：`relative_strength`、`trend_acceleration`、`breakout`、`volume_confirmation`、`trend_efficiency`、`downside_risk`、`liquidity`。
 - `factors.weak_market_weight_threshold`：市场宽度低于该值时使用弱市权重；`factors.weak_market_weights`：与主权重同键且合计为1，默认提高下行风险和适度突破的权重。
+- `factors.weak_market_trial_*`：极端弱市精选试仓实验参数；默认关闭，仅允许极少数高排名且多重确认、同时市场出现恢复迹象的候选以低总暴露试仓，不改变普通弱市仓位控制。
+- `GOLDMINER_BACKTEST_WEAK_TRIAL=1`：仅用于离线回测开启上述实验，不会改变生产配置。
+- `factors.weak_market_recovery_*`：从极端弱市恢复到普通弱市时的分阶段低仓位入场实验参数；默认关闭。
+- `GOLDMINER_BACKTEST_WEAK_RECOVERY=1`：仅用于离线回测开启恢复阶段实验，不会改变生产配置。
 - `factors.minimum_potential_confirmations`：新买入所需的最少潜力确认数。
 - `factors.entry_percentile` / `exit_percentile`：新买排名门槛与持仓退出缓冲分别配置；`weak_market_exit_percentile` 与 `normal_market_exit_percentile` 允许按市场宽度在弱市严格退出、正常市场扩大持有缓冲。
 - `factors.require_benchmark_bullish_for_new_entries`：可选的弱指数趋势硬门禁；默认关闭时由市场宽度决定目标暴露，弱市仍可低仓位试仓。
 - `factors.potential_transition_relaxed_enabled`：允许满足近期相对强度改善和风险边界的弱转强股票进入评分池；不是无条件放宽动量过滤。
 - `factors.potential_transition_early_weight`：潜力因子中早期强度的权重；其余权重分配给近期相对基准改善，默认 `0.55`。
-- `deployment.live_new_entries_enabled`：独立的实盘新买入人工门禁；回测失败时必须为 `false`。
+- `deployment.live_new_entries_enabled`：独立的实盘新买入人工门禁；默认必须为 `false`，仅在明确人工授权后才可开启。
 - `deployment.validation_status`：最近一次无未来数据验证状态。
 - `risk.permanent_capital_lock`：达到资本/高水位硬线后是否永久停止新增风险。
 

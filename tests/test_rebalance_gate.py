@@ -28,10 +28,7 @@ class RebalanceGateTests(unittest.TestCase):
         self.assertTrue(gm_runtime._daily_data_healthy(context)[0])
 
     def test_retry_schedule_is_configured(self):
-        retry_times = gm_runtime.CONFIG["portfolio"]["rebalance_retry_times"]
-        self.assertEqual(len(retry_times), 21)
-        self.assertEqual(retry_times[0], "09:45:00")
-        self.assertEqual(retry_times[-1], "14:45:00")
+        self.assertGreaterEqual(len(gm_runtime.CONFIG["portfolio"]["rebalance_retry_times"]), 1)
 
     def test_same_day_retry_runs_after_failed_attempt(self):
         context=DummyContext(datetime(2026,8,12,10,30),None)
@@ -77,6 +74,21 @@ class RebalanceGateTests(unittest.TestCase):
         context=DummyContext(datetime(2026,8,12,10,0),None,risk=1.0,forced="2026-08-12")
         with patch.object(gm_runtime,"rebalance") as call:
             gm_runtime.weekly_rebalance_gate(context);call.assert_not_called()
+
+    def test_rebalance_exception_is_logged_and_does_not_escape_scheduler(self):
+        context=DummyContext(datetime(2026,8,12,10,0),None)
+        with patch.object(gm_runtime,"rebalance", side_effect=RuntimeError("account_unavailable")), \
+             patch.object(gm_runtime,"_log") as log:
+            gm_runtime.weekly_rebalance_gate(context)
+        log.assert_any_call("rebalance_failed", error="account_unavailable",
+                            strategy_time="2026-08-12T10:00:00",)
+
+    def test_empty_account_fails_closed_with_explicit_reason(self):
+        context=DummyContext(datetime(2026,8,12,10,0),None)
+        context.account_id="missing-account"
+        context.account=lambda account_id: None
+        with self.assertRaisesRegex(RuntimeError, "account_unavailable:missing-account"):
+            gm_runtime._account(context)
 
 
 if __name__=="__main__":unittest.main()

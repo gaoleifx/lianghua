@@ -99,4 +99,3 @@ def live_main_fund_signal(symbol, now=None):
     }
     _CACHE[key] = result
     return result
-

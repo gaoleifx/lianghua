@@ -361,6 +361,37 @@ def classify_market_regime(breadth_ratio: float, benchmark_trend_ok: bool,
     return "strong" if bool(benchmark_trend_ok) else "range"
 
 
+def update_weak_trial_observation_pool(existing, symbols, as_of,
+                                       max_size=5, max_age_days=15):
+    """Keep a short-lived, auditable pool of weak-market trial candidates.
+
+    ``existing`` accepts the current dictionary format and the legacy list
+    format.  Candidates are refreshed when they reappear in the top-ranked
+    weak-market set; stale entries are removed before returning.
+    """
+    cutoff = pd.Timestamp(as_of) - pd.Timedelta(days=int(max_age_days))
+    pool = {}
+    if isinstance(existing, dict):
+        for symbol, observed in existing.items():
+            try:
+                stamp = pd.Timestamp(observed)
+            except (TypeError, ValueError):
+                continue
+            if stamp >= cutoff:
+                pool[str(symbol)] = str(stamp.date())
+    elif isinstance(existing, (list, tuple, set)):
+        # Legacy entries have no observation timestamp.  Treat them as fresh
+        # during the first state migration, then use the dated format.
+        for symbol in existing:
+            pool[str(symbol)] = str(pd.Timestamp(as_of).date())
+
+    observed_date = str(pd.Timestamp(as_of).date())
+    for symbol in reversed([str(item) for item in symbols]):
+        pool[symbol] = observed_date
+    ordered = sorted(pool.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    return dict(ordered[:max(1, int(max_size))])
+
+
 class FactorEngine:
     NAMES = ("relative_strength", "trend_acceleration", "breakout", "volume_confirmation",
              "trend_efficiency", "downside_risk", "potential_transition", "liquidity", "quality_growth")
@@ -720,7 +751,8 @@ class PortfolioBuilder:
         self.config = config or load_config()
 
     def build(self, factors: List[FactorRow], holdings=None, risk_multiplier=1.0,
-              target_count=None, allow_new_positions=True, target_exposure=None) -> List[TargetPosition]:
+              target_count=None, allow_new_positions=True, target_exposure=None,
+              weak_market_trial=False) -> List[TargetPosition]:
         holdings = set(holdings or [])
         p, fc = self.config["portfolio"], self.config["factors"]
         minimum_confirmations = int(fc.get("minimum_potential_confirmations", 0))
@@ -737,7 +769,9 @@ class PortfolioBuilder:
                     (x.symbol in holdings and x.percentile <= fc["exit_percentile"])]
         selected, industries = [], {}
         target_count = int(target_count or p["max_stocks"])
-        target_count = max(p["minimum_stocks"], min(target_count, p["max_stocks"]))
+        minimum_target_count = (int(fc.get("weak_market_trial_max_stocks", 1))
+                                if weak_market_trial else p["minimum_stocks"])
+        target_count = max(minimum_target_count, min(target_count, p["max_stocks"]))
         industry_slots = max(1, int(p["max_industry_weight"] / min(p["max_stock_weight"], 1.0/target_count) + 1e-9))
         for item in eligible:
             if industries.get(item.industry, 0) >= industry_slots:

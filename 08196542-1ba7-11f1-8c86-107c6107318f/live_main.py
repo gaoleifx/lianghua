@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config")))
 from gm.api import *
 from gm_runtime import initialize, on_bar, on_order_status, rebalance
-from runtime_env import user_environment
+from runtime_env import acquire_single_instance, user_environment
 
 
 def init(context):
@@ -17,6 +17,7 @@ def init(context):
 
 
 if __name__ == "__main__":
+    acquire_single_instance("live")
     token = user_environment("GM_TOKEN")
     if not token:
         raise RuntimeError("请设置GM_TOKEN环境变量")

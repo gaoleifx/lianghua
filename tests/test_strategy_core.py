@@ -20,8 +20,11 @@ from strategy_core import (FactorEngine, FactorRow, LocalDatabase, PortfolioBuil
                            evaluate_tradability, position_available, position_cost,
                            can_increase_existing_position, positive_pyramid_target,
                            calculate_market_breadth, market_target_exposure,
-                           market_exit_percentile,
+                           market_entry_allowed, market_exit_percentile,
                            classify_market_regime,
+                           update_weak_trial_observation_pool,
+                           forward_performance_labels,
+                           summarize_backtest_events,
                            trend_leader_signal,
                            protected_limit_price, round_lot)
 
@@ -162,6 +165,59 @@ class StrategyCoreTests(unittest.TestCase):
         self.assertEqual(market_target_exposure(.35, cfg), .90)
         self.assertEqual(market_target_exposure(.50, cfg), 1.00)
 
+    def test_weak_market_can_open_reduced_exposure(self):
+        closes = np.linspace(12, 10, 80)  # benchmark trend is weak
+        self.assertTrue(market_entry_allowed(closes, .20, self.cfg))
+        self.assertFalse(market_entry_allowed(closes, .19, self.cfg))
+
+    def test_weak_trial_observation_pool_refreshes_and_expires(self):
+        pool = update_weak_trial_observation_pool(
+            {"A": "2025-01-01", "B": "2025-01-10"}, ["C", "A"],
+            "2025-01-15", max_size=3, max_age_days=10)
+        self.assertEqual(list(pool), ["C", "A", "B"])
+        self.assertEqual(pool["A"], "2025-01-15")
+        expired = update_weak_trial_observation_pool(
+            pool, [], "2025-01-27", max_size=3, max_age_days=10)
+        self.assertEqual(expired, {})
+
+    def test_weak_trial_observation_pool_migrates_legacy_list(self):
+        pool = update_weak_trial_observation_pool(
+            ["SHSE.600000"], [], "2025-01-15", max_size=5, max_age_days=10)
+        self.assertEqual(pool, {"SHSE.600000": "2025-01-15"})
+
+    def test_benchmark_gate_remains_explicit_opt_in(self):
+        cfg = json.loads(json.dumps(self.cfg))
+        cfg["factors"]["require_benchmark_bullish_for_new_entries"] = True
+        weak = np.linspace(12, 10, 80)
+        strong = np.linspace(10, 12, 80)
+        self.assertFalse(market_entry_allowed(weak, .50, cfg))
+        self.assertTrue(market_entry_allowed(strong, .50, cfg))
+
+    def test_forward_labels_are_future_only_and_include_excess_drawdown(self):
+        prices = [100, 102, 98, 105, 110, 108, 115, 120]
+        benchmark = [100, 100, 100, 100, 100, 100, 100, 100]
+        labels = forward_performance_labels(prices, benchmark, horizons=(2,), stop_loss=.05)
+        self.assertAlmostEqual(labels.loc[0, "forward_return_2"], -.02)
+        self.assertAlmostEqual(labels.loc[0, "forward_excess_2"], -.02)
+        self.assertAlmostEqual(labels.loc[0, "forward_max_drawdown_2"], -.02)
+        self.assertFalse(bool(labels.loc[0, "forward_hit_stop_2"]))
+        self.assertTrue(bool(labels.loc[1, "forward_first_dip_then_rise_2"]))
+        self.assertTrue(pd.isna(labels.loc[len(prices) - 1, "forward_return_2"]))
+
+    def test_backtest_event_summary_tracks_return_drawdown_and_execution(self):
+        result = summarize_backtest_events([
+            {"event": "portfolio_risk", "asset": 100.0, "initial_asset": 100.0},
+            {"event": "portfolio_risk", "asset": 90.0, "initial_asset": 100.0},
+            {"event": "portfolio_risk", "asset": 95.0, "initial_asset": 100.0},
+            {"event": "order_submitted"}, {"event": "order_blocked"},
+            {"event": "rebalance_aborted", "reason": "market_breadth_below_entry_floor"},
+        ])
+        self.assertAlmostEqual(result["total_return"], -.05)
+        self.assertAlmostEqual(result["max_drawdown"], .10)
+        self.assertEqual(result["orders_submitted"], 1)
+        self.assertEqual(result["orders_blocked"], 1)
+        self.assertEqual(result["zero_exposure_aborted"], 1)
+
     def test_potential_filters_weak_overheated_and_unconfirmed_volume(self):
         cfg = json.loads(json.dumps(self.cfg))
         cfg["factors"]["maximum_5d_return"] = .18
@@ -191,6 +247,20 @@ class StrategyCoreTests(unittest.TestCase):
         self.assertIn(universe.excluded["SHSE.600103"], ("short_term_overheated", "overheated"))
         no_volume = raw[raw.symbol == "SHSE.600104"].iloc[0]
         self.assertFalse(bool(no_volume.confirm_volume))
+
+    def test_recent_limit_ups_do_not_bypass_overheat_caps(self):
+        engine = FactorEngine(self.cfg)
+        dates = pd.date_range("2025-01-01", periods=130)
+        prices = np.r_[np.linspace(10, 12, 125), 12.0, 13.2, 14.52, 15.97, 17.57]
+        bars = pd.DataFrame({"code": "600105", "date": dates.astype(str), "open": prices,
+                             "close": prices, "high": prices, "low": prices * .99,
+                             "volume": np.full(130, 10000000.0)})
+        benchmark = pd.DataFrame({"date": dates.astype(str), "close": np.linspace(10, 11, 130)})
+        universe = UniverseSnapshot("2025-07-01", ["SHSE.600105"])
+        raw = engine.build_raw(universe, bars, pd.DataFrame(),
+                               pd.DataFrame([{"code": "600105", "sector": "A"}]), benchmark)
+        self.assertTrue(raw.empty)
+        self.assertIn(universe.excluded["SHSE.600105"], ("short_term_overheated", "overheated"))
 
     def test_trend_leader_holds_consecutive_limit_ups(self):
         dates = pd.date_range("2025-01-01", periods=30)

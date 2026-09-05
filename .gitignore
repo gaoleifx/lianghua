@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.log
+*.log.*
+logs/
+*.db
+*.db-*
+.env
+.env.*
+config/config.before_*.json
